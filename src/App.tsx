@@ -6,7 +6,10 @@ type CompanyProfile = {
   ownerName: string
   email: string
   phone: string
-  address: string
+  streetAddress: string
+  city: string
+  province: string
+  postalCode: string
   logoDataUrl: string
   gstHstNumber: string
   invoiceNumberPrefix: string
@@ -64,12 +67,17 @@ type InvoiceMeta = {
   shipping: number
 }
 
+const APP_BRAND = 'CInvoice'
+
 const initialProfile: CompanyProfile = {
-  companyName: 'CInvoice Studio',
+  companyName: `${APP_BRAND} Studio`,
   ownerName: 'Alex Carter',
   email: 'billing@cinvoice.com',
   phone: '+1 416 000 0000',
-  address: '101 King St W, Toronto, ON',
+  streetAddress: '101 King St W',
+  city: 'Toronto',
+  province: 'ON',
+  postalCode: '',
   logoDataUrl: '',
   gstHstNumber: 'GST/HST-CA-4452',
   invoiceNumberPrefix: 'INV',
@@ -347,25 +355,19 @@ function App() {
       })
     }
 
-    const buildPdfAddressLines = (addr: string, maxW: number): string[] => {
-      const trimmed = addr.trim()
-      if (!trimmed) return ['']
-      const parts = trimmed.split(/\s*,\s*/).map((p) => p.trim()).filter(Boolean)
-      if (parts.length >= 3) {
-        const streetAndCity = parts.slice(0, -1).join(', ')
-        const provincePostal = parts[parts.length - 1]
-        return [
-          ...doc.splitTextToSize(streetAndCity, maxW),
-          ...doc.splitTextToSize(provincePostal, maxW),
-        ]
-      }
-      if (parts.length === 2) {
-        return [...doc.splitTextToSize(parts[0], maxW), ...doc.splitTextToSize(parts[1], maxW)]
-      }
-      return doc.splitTextToSize(trimmed, maxW)
+    const wrapCompanyAddressForPdf = (maxW: number): string[] => {
+      const out: string[] = []
+      const street = profile.streetAddress.trim()
+      const cityLine = [profile.city, profile.province, profile.postalCode]
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join(', ')
+      if (street) out.push(...doc.splitTextToSize(street, maxW))
+      if (cityLine) out.push(...doc.splitTextToSize(cityLine, maxW))
+      return out.length ? out : ['']
     }
 
-    const addrLines = buildPdfAddressLines(profile.address, addrMaxW)
+    const addrLines = wrapCompanyAddressForPdf(addrMaxW)
     const stackGap = 4.75
     const contactRows = 1 + addrLines.length + 3
     const blockSpan = (contactRows - 1) * stackGap + 2.4
@@ -417,6 +419,47 @@ function App() {
     const clientLines = doc.splitTextToSize(clientName, 84)
     doc.text(clientLines, mL + 2, secY + 4.5)
     let clientBottom = secY + 4.5 + clientLines.length * 5 + 1
+
+    const billToClient =
+      clients.find((c) => `${c.company} (${c.name})` === clientName.trim()) ??
+      (clientGstHstNumber.trim()
+        ? clients.find((c) => c.gstHstNumber.trim() === clientGstHstNumber.trim())
+        : undefined)
+    if (billToClient) {
+      const billW = 84
+      const addrStep = 4.75
+      const street = billToClient.streetAddress.trim()
+      const cityLine = [billToClient.city, billToClient.province, billToClient.postalCode]
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join(', ')
+      doc.setFontSize(9)
+      doc.setTextColor(51, 65, 85)
+      if (street) {
+        for (const line of doc.splitTextToSize(street, billW)) {
+          doc.text(line, mL + 2, clientBottom)
+          clientBottom += addrStep
+        }
+      }
+      if (cityLine) {
+        for (const line of doc.splitTextToSize(cityLine, billW)) {
+          doc.text(line, mL + 2, clientBottom)
+          clientBottom += addrStep
+        }
+      }
+      const phone = billToClient.phone.trim()
+      const email = billToClient.email.trim()
+      if (phone || email) {
+        doc.setFontSize(8.5)
+        doc.setTextColor(71, 85, 105)
+        const contactLine = [phone, email].filter(Boolean).join(' · ')
+        for (const line of doc.splitTextToSize(contactLine, billW)) {
+          doc.text(line, mL + 2, clientBottom)
+          clientBottom += addrStep
+        }
+      }
+    }
+
     if (clientGstHstNumber) {
       doc.setFontSize(8.5)
       doc.setTextColor(71, 85, 105)
@@ -546,7 +589,9 @@ function App() {
       ty += 5.5
     }
     moneyRow('Subtotal (before tax)', `$${totals.subTotalRaw.toFixed(2)}`)
-    moneyRow('Discount', `-$${meta.discount.toFixed(2)}`)
+    const discountCell =
+      meta.discount > 0 ? `-$${meta.discount.toFixed(2)}` : `$${meta.discount.toFixed(2)}`
+    moneyRow('Discount', discountCell)
     if (taxBreakdown.length === 0) {
       moneyRow('Tax', '$0.00')
     } else {
@@ -566,15 +611,25 @@ function App() {
 
     const footerY = PH - 8
     const totalPages = doc.getNumberOfPages()
+    const tagLineBefore = 'Generated with '
+    const tagLineAfter = ' — frontend mock preview'
     for (let p = 1; p <= totalPages; p++) {
       doc.setPage(p)
       doc.setFont('helvetica', 'normal')
       doc.setFontSize(8)
       doc.setTextColor(148, 163, 184)
       doc.text(`Page ${p} of ${totalPages}`, PW - mR, footerY, { align: 'right' })
+      let fx = mL
+      doc.text(tagLineBefore, fx, footerY)
+      fx += doc.getTextWidth(tagLineBefore)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(100, 116, 130)
+      doc.text(APP_BRAND, fx, footerY)
+      fx += doc.getTextWidth(APP_BRAND)
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(148, 163, 184)
+      doc.text(tagLineAfter, fx, footerY)
     }
-    doc.setPage(totalPages)
-    doc.text('Generated with CInvoice - frontend mock preview', mL, footerY)
 
     doc.save(`${meta.invoiceNumber}.pdf`)
   }
@@ -584,10 +639,10 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-badge brand-logo-box">
-            <img src={brandLogoPath} alt="CInvoice logo" className="brand-logo" />
+            <img src={brandLogoPath} alt={`${APP_BRAND} logo`} className="brand-logo" />
           </span>
           <div>
-            <h1>CInvoice</h1>
+            <h1>{APP_BRAND}</h1>
             <p className="muted">Billing Workspace</p>
           </div>
         </div>
@@ -625,6 +680,7 @@ function App() {
                 <CreateInvoicePage
                   clientName={clientName}
                   setClientName={setClientName}
+                  clientGstHstNumber={clientGstHstNumber}
                   setClientGstHstNumber={setClientGstHstNumber}
                   clients={clients}
                   setClients={setClients}
@@ -860,9 +916,29 @@ function CompanyPage({
             Phone
             <input value={profile.phone} onChange={(e) => setValue('phone', e.target.value)} />
           </label>
+          <label className="invoice-field-span">
+            Street address
+            <input
+              value={profile.streetAddress}
+              onChange={(e) => setValue('streetAddress', e.target.value)}
+              placeholder="e.g. 101 King St W"
+            />
+          </label>
           <label>
-            Address
-            <textarea rows={2} value={profile.address} onChange={(e) => setValue('address', e.target.value)} />
+            City
+            <input value={profile.city} onChange={(e) => setValue('city', e.target.value)} placeholder="Toronto" />
+          </label>
+          <label>
+            Province / state
+            <input value={profile.province} onChange={(e) => setValue('province', e.target.value)} placeholder="ON" />
+          </label>
+          <label>
+            Postal code
+            <input
+              value={profile.postalCode}
+              onChange={(e) => setValue('postalCode', e.target.value)}
+              placeholder="M5J 2N8"
+            />
           </label>
           <label>
             GST/HST Number
@@ -899,7 +975,11 @@ function CompanyPage({
         <div className="kpi-list">
           <div className="kpi-row">
             <span>Business details complete</span>
-            <strong>{profile.companyName && profile.email && profile.address ? 'Ready' : 'Missing'}</strong>
+            <strong>
+              {profile.companyName && profile.email && profile.streetAddress.trim() && profile.city.trim()
+                ? 'Ready'
+                : 'Missing'}
+            </strong>
           </div>
           <div className="kpi-row">
             <span>GST/HST number set</span>
@@ -1144,6 +1224,7 @@ function CatalogPage({
 function CreateInvoicePage({
   clientName,
   setClientName,
+  clientGstHstNumber,
   setClientGstHstNumber,
   clients,
   setClients,
@@ -1161,6 +1242,7 @@ function CreateInvoicePage({
 }: {
   clientName: string
   setClientName: (name: string) => void
+  clientGstHstNumber: string
   setClientGstHstNumber: (value: string) => void
   clients: ClientRecord[]
   setClients: (clients: ClientRecord[]) => void
@@ -1224,6 +1306,16 @@ function CreateInvoicePage({
   const clientOptions = clients.filter((client) =>
     `${client.name} ${client.company}`.toLowerCase().includes(clientQuery.toLowerCase()),
   )
+
+  const matchedBillToClient = useMemo(() => {
+    const label = clientName.trim()
+    return (
+      clients.find((c) => `${c.company} (${c.name})` === label) ??
+      (clientGstHstNumber.trim()
+        ? clients.find((c) => c.gstHstNumber.trim() === clientGstHstNumber.trim())
+        : undefined)
+    )
+  }, [clients, clientName, clientGstHstNumber])
 
   const onClientInput = (value: string) => {
     setClientQuery(value)
@@ -1309,7 +1401,16 @@ function CreateInvoicePage({
         <div>
           <div className="invoice-sender-strip">
             <strong>{profile.companyName}</strong>
-            <span className="invoice-sender-strip__muted">{profile.address}</span>
+            {profile.streetAddress.trim() ? (
+              <span className="invoice-sender-strip__muted">{profile.streetAddress}</span>
+            ) : null}
+            {(() => {
+              const cityLine = [profile.city, profile.province, profile.postalCode]
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .join(', ')
+              return cityLine ? <span className="invoice-sender-strip__muted">{cityLine}</span> : null
+            })()}
             <span className="invoice-sender-strip__muted">
               {profile.phone} · {profile.email}
             </span>
@@ -1352,6 +1453,25 @@ function CreateInvoicePage({
                   </div>
                 )}
               </div>
+              {matchedBillToClient && (
+                <div className="muted" style={{ marginTop: '0.55rem', fontSize: '0.84rem', lineHeight: 1.45 }}>
+                  {matchedBillToClient.streetAddress.trim() ? (
+                    <div>{matchedBillToClient.streetAddress}</div>
+                  ) : null}
+                  {(() => {
+                    const cityLine = [matchedBillToClient.city, matchedBillToClient.province, matchedBillToClient.postalCode]
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+                      .join(', ')
+                    return cityLine ? <div>{cityLine}</div> : null
+                  })()}
+                  {(matchedBillToClient.phone || matchedBillToClient.email) && (
+                    <div style={{ marginTop: 4 }}>
+                      {[matchedBillToClient.phone, matchedBillToClient.email].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
+                </div>
+              )}
             </label>
 
             <div className="invoice-meta-grid">
@@ -1511,7 +1631,11 @@ function CreateInvoicePage({
           </div>
           <div className="summary-row">
             <span>Discount</span>
-            <strong>-${meta.discount.toFixed(2)}</strong>
+            <strong>
+              {meta.discount > 0
+                ? `-$${meta.discount.toFixed(2)}`
+                : `$${meta.discount.toFixed(2)}`}
+            </strong>
           </div>
           {totals.taxByRate.filter((t) => t.amount >= 0.005).length === 0 && (
             <div className="summary-row">

@@ -65,7 +65,7 @@ type InvoiceMeta = {
 }
 
 const initialProfile: CompanyProfile = {
-  companyName: 'Cinvoice Studio',
+  companyName: 'CInvoice Studio',
   ownerName: 'Alex Carter',
   email: 'billing@cinvoice.com',
   phone: '+1 416 000 0000',
@@ -574,7 +574,7 @@ function App() {
       doc.text(`Page ${p} of ${totalPages}`, PW - mR, footerY, { align: 'right' })
     }
     doc.setPage(totalPages)
-    doc.text('Generated with Cinvoice - frontend mock preview', mL, footerY)
+    doc.text('Generated with CInvoice - frontend mock preview', mL, footerY)
 
     doc.save(`${meta.invoiceNumber}.pdf`)
   }
@@ -584,10 +584,10 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-badge brand-logo-box">
-            <img src={brandLogoPath} alt="Cinvoice logo" className="brand-logo" />
+            <img src={brandLogoPath} alt="CInvoice logo" className="brand-logo" />
           </span>
           <div>
-            <h1>Cinvoice</h1>
+            <h1>CInvoice</h1>
             <p className="muted">Billing Workspace</p>
           </div>
         </div>

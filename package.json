@@ -1,5 +1,6 @@
 {
   "name": "cinvoice",
+  "description": "CInvoice – billing workspace frontend (mock data)",
   "private": true,
   "version": "0.0.0",
   "type": "module",

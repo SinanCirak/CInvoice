@@ -14,6 +14,14 @@ type CompanyProfile = {
   gstHstNumber: string
   invoiceNumberPrefix: string
   invoiceNumberYear: string
+  paymentAccountName: string
+  paymentInstitutionName: string
+  paymentTransitNumber: string
+  paymentAccountNumber: string
+  paymentEmail: string
+  stripeAccountId: string
+  stripePublishableKey: string
+  stripeWebhookSecret: string
 }
 
 type CatalogItem = {
@@ -82,6 +90,14 @@ const initialProfile: CompanyProfile = {
   gstHstNumber: 'GST/HST-CA-4452',
   invoiceNumberPrefix: 'INV',
   invoiceNumberYear: new Date().getFullYear().toString(),
+  paymentAccountName: 'CInvoice Studio Ltd.',
+  paymentInstitutionName: 'RBC Royal Bank',
+  paymentTransitNumber: '00011',
+  paymentAccountNumber: '4200567',
+  paymentEmail: 'payments@cinvoice.com',
+  stripeAccountId: 'acct_1NMock8pQ2s9',
+  stripePublishableKey: 'pk_live_51NMockxxxxxxxxxxxxxxxx',
+  stripeWebhookSecret: 'whsec_mock_xxxxxxxxxxxxxxxx',
 }
 
 const initialCatalog: CatalogItem[] = [
@@ -91,6 +107,92 @@ const initialCatalog: CatalogItem[] = [
 ]
 
 const brandLogoPath = '/logo.png'
+
+const CANADA_PROVINCES = [
+  'AB',
+  'BC',
+  'MB',
+  'NB',
+  'NL',
+  'NS',
+  'NT',
+  'NU',
+  'ON',
+  'PE',
+  'QC',
+  'SK',
+  'YT',
+] as const
+
+type UiIconName = 'search' | 'filter' | 'columns' | 'edit' | 'save' | 'view' | 'check' | 'trash'
+
+function UiIcon({ name }: { name: UiIconName }) {
+  const common = { fill: 'none', stroke: 'currentColor', strokeWidth: '1.8', strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const }
+  if (name === 'search') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="11" cy="11" r="7" {...common} />
+        <path d="M20 20l-3.5-3.5" {...common} />
+      </svg>
+    )
+  }
+  if (name === 'filter') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 6h16l-6.5 7v5l-3-1.8V13L4 6z" {...common} />
+      </svg>
+    )
+  }
+  if (name === 'columns') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="5" width="5" height="14" rx="1.5" {...common} />
+        <rect x="9.5" y="5" width="5" height="14" rx="1.5" {...common} />
+        <rect x="16" y="5" width="5" height="14" rx="1.5" {...common} />
+      </svg>
+    )
+  }
+  if (name === 'edit') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 20h4l10-10-4-4L4 16v4z" {...common} />
+        <path d="M12.5 7.5l4 4" {...common} />
+      </svg>
+    )
+  }
+  if (name === 'save') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 4h11l3 3v13H5V4z" {...common} />
+        <path d="M8 4v6h8V4" {...common} />
+        <rect x="8" y="14" width="8" height="6" rx="1.5" {...common} />
+      </svg>
+    )
+  }
+  if (name === 'view') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z" {...common} />
+        <circle cx="12" cy="12" r="2.8" {...common} />
+      </svg>
+    )
+  }
+  if (name === 'trash') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 7h16" {...common} />
+        <path d="M9 7V5h6v2" {...common} />
+        <path d="M7 7l1 12h8l1-12" {...common} />
+        <path d="M10 11v5M14 11v5" {...common} />
+      </svg>
+    )
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 12l4 4 10-10" {...common} />
+    </svg>
+  )
+}
 
 /** PDF palette: same green family as logo, muted / lower chroma for less eye strain */
 const PDF_BRAND = {
@@ -113,6 +215,12 @@ const PDF_BRAND = {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function normalizeCanadianPostalCode(value: string): string {
+  const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
+  if (cleaned.length <= 3) return cleaned
+  return `${cleaned.slice(0, 3)} ${cleaned.slice(3)}`
 }
 
 function taxLabelForRate(rate: number): string {
@@ -654,18 +762,11 @@ function App() {
           <NavLink to="/create-invoice">Create Invoice</NavLink>
           <NavLink to="/invoices">Invoices</NavLink>
           <NavLink to="/clients">Clients</NavLink>
-          <NavLink to="/company">Company Profile</NavLink>
+          <NavLink to="/company">Settings</NavLink>
         </nav>
       </aside>
 
       <main className="content">
-        <header className="topbar">
-          <div>
-            <p className="muted">Environment</p>
-            <h2>Production-like Frontend (Mock Data)</h2>
-          </div>
-          <button className="primary ghost">Upgrade to Cloud Sync</button>
-        </header>
         <div className="page-wrap">
           <Routes>
             <Route
@@ -719,7 +820,6 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
   const collectionRate = '92.4%'
   const overdueAmount = '$2,180'
   const taxReserve = '$9,460'
-  const uxScore = 86
   const recentInvoices = [
     { no: 'INV-2026-041', client: 'Northwind Labs', status: 'Paid', due: '2026-04-20', amount: '$1,840' },
     { no: 'INV-2026-042', client: 'Apex Mechanical', status: 'Open', due: '2026-04-28', amount: '$2,250' },
@@ -731,34 +831,47 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
     <section>
       <div className="page-head">
         <div>
-          <h2>Sales Dashboard</h2>
-          <p className="muted">Track collection health, invoice velocity, and tax exposure in one place.</p>
+          <h2>Dashboard</h2>
+          <p className="muted">Quick snapshot of cashflow, outstanding work, and next actions.</p>
         </div>
-        <button>New Invoice</button>
+        <div className="row">
+          <button className="ghost">Export</button>
+          <button className="primary">New Invoice</button>
+        </div>
       </div>
-      <div className="quick-actions">
-        <button className="action-chip">Send Reminder</button>
-        <button className="action-chip">Duplicate Last Invoice</button>
-        <button className="action-chip">Export Monthly Report</button>
-        <button className="action-chip">Create Tax Snapshot</button>
+
+      <div className="dashboard-actions">
+        <button className="icon-btn" title="Send reminder" aria-label="Send reminder">
+          <UiIcon name="check" />
+        </button>
+        <button className="icon-btn" title="Quick filter" aria-label="Quick filter">
+          <UiIcon name="filter" />
+        </button>
+        <button className="icon-btn" title="Customize columns" aria-label="Customize columns">
+          <UiIcon name="columns" />
+        </button>
+        <button className="icon-btn" title="Search records" aria-label="Search records">
+          <UiIcon name="search" />
+        </button>
       </div>
+
       <div className="stats-grid">
-        <article className="card">
+        <article className="card kpi-card">
           <p className="muted">Today Collected</p>
           <h3>{today}</h3>
-          <p className="tiny">+8.2% vs yesterday</p>
+          <p className="tiny kpi-up">+8.2% vs yesterday</p>
         </article>
-        <article className="card">
+        <article className="card kpi-card">
           <p className="muted">This Week</p>
           <h3>{weeks}</h3>
           <p className="tiny">14 invoices issued</p>
         </article>
-        <article className="card">
+        <article className="card kpi-card">
           <p className="muted">Monthly Revenue</p>
           <h3>${totalSales.toLocaleString()}</h3>
           <p className="tiny">Target: $60,000</p>
         </article>
-        <article className="card">
+        <article className="card kpi-card">
           <p className="muted">Year-to-Date</p>
           <h3>{year}</h3>
           <p className="tiny">Forecast: $110,000</p>
@@ -767,7 +880,10 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
 
       <div className="split-grid">
         <div className="card">
-          <h3>Monthly Trend</h3>
+          <div className="dashboard-panel-head">
+            <h3>Revenue Trend</h3>
+            <span className="mini-trend">Last 7 months</span>
+          </div>
           <div className="bars">
             {monthly.map((value, i) => (
               <div key={value + i} className="bar-wrap">
@@ -776,9 +892,15 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
               </div>
             ))}
           </div>
+          <p className="muted" style={{ marginTop: '0.6rem' }}>
+            Stable growth. Biggest uplift comes from recurring service invoices.
+          </p>
         </div>
         <div className="card">
-          <h3>Collections & Tax Health</h3>
+          <div className="dashboard-panel-head">
+            <h3>Action Center</h3>
+            <span className="mini-trend">Today</span>
+          </div>
           <div className="kpi-list">
             <div className="kpi-row">
               <span>Collection Rate</span>
@@ -793,58 +915,34 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
               <strong>{taxReserve}</strong>
             </div>
           </div>
-          <p className="muted">Next step: connect expenses and auto-generate tax return summary pages.</p>
-        </div>
-      </div>
-
-      <div className="split-grid">
-        <div className="card">
-          <h3>Operations Focus</h3>
-          <div className="milestone-list">
+          <div className="milestone-list" style={{ marginTop: '0.7rem' }}>
             <div className="milestone-row">
               <span className="dot done" />
               <div>
-                <strong>Invoices sent today</strong>
-                <p className="muted">8 sent, 5 viewed by clients.</p>
+                <strong>Send 3 reminders</strong>
+                <p className="muted">Open invoices nearing due date.</p>
               </div>
             </div>
             <div className="milestone-row">
               <span className="dot progress" />
               <div>
-                <strong>Pending follow-ups</strong>
-                <p className="muted">3 open invoices need reminder email.</p>
-              </div>
-            </div>
-            <div className="milestone-row">
-              <span className="dot" />
-              <div>
-                <strong>Tax package prep</strong>
-                <p className="muted">Expense module planned for next milestone.</p>
+                <strong>Review tax snapshot</strong>
+                <p className="muted">Reserve is above threshold this week.</p>
               </div>
             </div>
           </div>
-        </div>
-        <div className="card">
-          <h3>Workspace Quality Score</h3>
-          <div className="score-ring">
-            <div className="score-ring-inner">
-              <strong>{uxScore}%</strong>
-              <span>Health</span>
-            </div>
-          </div>
-          <p className="muted">
-            Score is based on profile completion, catalog readiness, and invoice structure quality.
-          </p>
         </div>
       </div>
 
-      <div className="card">
+      <div className="card data-grid">
         <div className="page-head">
           <h3>Recent Invoices</h3>
-          <button>View All</button>
+          <button className="icon-btn" title="View all invoices" aria-label="View all invoices">
+            <UiIcon name="view" />
+          </button>
         </div>
         <div className="invoice-table">
-          <div className="invoice-table-head">
+          <div className="invoice-table-head dashboard-invoice-grid">
             <span>Invoice</span>
             <span>Client</span>
             <span>Status</span>
@@ -852,7 +950,7 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
             <span>Amount</span>
           </div>
           {recentInvoices.map((invoice) => (
-            <div key={invoice.no} className="invoice-table-row">
+            <div key={invoice.no} className="invoice-table-row dashboard-invoice-grid">
               <span>{invoice.no}</span>
               <span>{invoice.client}</span>
               <span className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
@@ -876,7 +974,6 @@ function CompanyPage({
   const setValue = (key: keyof CompanyProfile, value: string) => {
     onChange({ ...profile, [key]: value })
   }
-
   const onLogoUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -886,120 +983,331 @@ function CompanyPage({
     }
     reader.readAsDataURL(file)
   }
+  const [activeTab, setActiveTab] = useState<'general' | 'payment' | 'security'>('general')
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  })
 
   return (
     <section>
       <div className="page-head">
         <div>
-          <h2>Company Profile</h2>
-          <p className="muted">Simple setup screen for invoice identity and legal details.</p>
+          <h2>Settings</h2>
+          <p className="muted">Manage company profile, payout setup, Stripe connection, and security preferences.</p>
         </div>
         <button>Save Draft</button>
       </div>
 
       <div className="card">
-        <h3>Company Information</h3>
-        <div className="form-grid two-col-simple">
-          <label>
-            Company Name
-            <input value={profile.companyName} onChange={(e) => setValue('companyName', e.target.value)} />
-          </label>
-          <label>
-            Owner Name
-            <input value={profile.ownerName} onChange={(e) => setValue('ownerName', e.target.value)} />
-          </label>
-          <label>
-            Email
-            <input value={profile.email} onChange={(e) => setValue('email', e.target.value)} />
-          </label>
-          <label>
-            Phone
-            <input value={profile.phone} onChange={(e) => setValue('phone', e.target.value)} />
-          </label>
-          <label className="invoice-field-span">
-            Street address
-            <input
-              value={profile.streetAddress}
-              onChange={(e) => setValue('streetAddress', e.target.value)}
-              placeholder="e.g. 101 King St W"
-            />
-          </label>
-          <label>
-            City
-            <input value={profile.city} onChange={(e) => setValue('city', e.target.value)} placeholder="Toronto" />
-          </label>
-          <label>
-            Province / state
-            <input value={profile.province} onChange={(e) => setValue('province', e.target.value)} placeholder="ON" />
-          </label>
-          <label>
-            Postal code
-            <input
-              value={profile.postalCode}
-              onChange={(e) => setValue('postalCode', e.target.value)}
-              placeholder="M5J 2N8"
-            />
-          </label>
-          <label>
-            GST/HST Number
-            <input value={profile.gstHstNumber} onChange={(e) => setValue('gstHstNumber', e.target.value)} />
-          </label>
-          <label>
-            Invoice number prefix
-            <input
-              value={profile.invoiceNumberPrefix}
-              onChange={(e) => setValue('invoiceNumberPrefix', e.target.value)}
-              placeholder="INV"
-            />
-            <span className="muted" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
-              Used for automatic numbering, e.g. {profile.invoiceNumberPrefix || 'INV'}-{profile.invoiceNumberYear || '2026'}-001
-            </span>
-          </label>
-          <label>
-            Invoice year
-            <input
-              value={profile.invoiceNumberYear}
-              onChange={(e) => setValue('invoiceNumberYear', e.target.value.replace(/\D/g, '').slice(0, 4))}
-              placeholder={new Date().getFullYear().toString()}
-              inputMode="numeric"
-            />
-            <span className="muted" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
-              Four digits (e.g. 2026). If empty, the current calendar year is used.
-            </span>
-          </label>
+        <div className="company-tabs" role="tablist" aria-label="Company billing tabs">
+          <button
+            type="button"
+            className={`company-tab ${activeTab === 'general' ? 'active' : ''}`}
+            role="tab"
+            aria-selected={activeTab === 'general'}
+            onClick={() => setActiveTab('general')}
+          >
+            General
+          </button>
+          <button
+            type="button"
+            className={`company-tab ${activeTab === 'payment' ? 'active' : ''}`}
+            role="tab"
+            aria-selected={activeTab === 'payment'}
+            onClick={() => setActiveTab('payment')}
+          >
+            Payment Information
+          </button>
+          <button
+            type="button"
+            className={`company-tab ${activeTab === 'security' ? 'active' : ''}`}
+            role="tab"
+            aria-selected={activeTab === 'security'}
+            onClick={() => setActiveTab('security')}
+          >
+            Password Change
+          </button>
         </div>
+
+        {activeTab === 'general' && (
+          <div className="group-box-stack">
+            <div className="group-box-grid">
+              <fieldset className="group-box">
+                <legend>Company details</legend>
+                <div className="form-grid two-col-simple">
+                  <label>
+                    Company Name
+                    <input value={profile.companyName} onChange={(e) => setValue('companyName', e.target.value)} />
+                  </label>
+                  <label>
+                    Owner Name
+                    <input value={profile.ownerName} onChange={(e) => setValue('ownerName', e.target.value)} />
+                  </label>
+                  <label>
+                    Email
+                    <input value={profile.email} onChange={(e) => setValue('email', e.target.value)} />
+                  </label>
+                  <label>
+                    Phone
+                    <input value={profile.phone} onChange={(e) => setValue('phone', e.target.value)} />
+                  </label>
+                  <label>
+                    GST/HST Number
+                    <input value={profile.gstHstNumber} onChange={(e) => setValue('gstHstNumber', e.target.value)} />
+                  </label>
+                  <label>
+                    Business registration ID
+                    <input placeholder="Optional registry identifier" />
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset className="group-box">
+                <legend>Address</legend>
+                <div className="form-grid two-col-simple">
+                  <label>
+                    Street address
+                    <input
+                      value={profile.streetAddress}
+                      onChange={(e) => setValue('streetAddress', e.target.value)}
+                      placeholder="e.g. 101 King St W"
+                    />
+                  </label>
+                  <label>
+                    City
+                    <input value={profile.city} onChange={(e) => setValue('city', e.target.value)} placeholder="Toronto" />
+                  </label>
+                  <label>
+                    Province / state
+                    <select value={profile.province} onChange={(e) => setValue('province', e.target.value)}>
+                      {CANADA_PROVINCES.map((province) => (
+                        <option key={province} value={province}>
+                          {province}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Postal code
+                    <input
+                      value={profile.postalCode}
+                      onChange={(e) => setValue('postalCode', normalizeCanadianPostalCode(e.target.value))}
+                      placeholder="A1A 1A1"
+                      maxLength={7}
+                    />
+                  </label>
+                  <label>
+                    Country
+                    <input value="Canada" readOnly />
+                  </label>
+                </div>
+              </fieldset>
+            </div>
+
+            <div className="group-box-grid">
+              <fieldset className="group-box">
+                <legend>Invoice defaults</legend>
+                <div className="form-grid two-col-simple">
+                  <label>
+                    Preferred invoice language
+                    <select defaultValue="English">
+                      <option>English</option>
+                      <option>French</option>
+                    </select>
+                  </label>
+                  <label>
+                    Invoice number prefix
+                    <input
+                      value={profile.invoiceNumberPrefix}
+                      onChange={(e) => setValue('invoiceNumberPrefix', e.target.value)}
+                      placeholder="INV"
+                    />
+                  </label>
+                  <label>
+                    Invoice year
+                    <input
+                      value={profile.invoiceNumberYear}
+                      onChange={(e) => setValue('invoiceNumberYear', e.target.value.replace(/\D/g, '').slice(0, 4))}
+                      placeholder={new Date().getFullYear().toString()}
+                      inputMode="numeric"
+                    />
+                    <span className="muted" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                      Four digits (e.g. 2026). If empty, the current calendar year is used.
+                    </span>
+                  </label>
+                  <label className="invoice-field-span">
+                    Internal billing note
+                    <input placeholder="Short note shown only to your team" />
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset className="group-box">
+                <legend>Company logo</legend>
+                <p className="muted">Upload PNG/JPG logo for invoice preview and PDF export.</p>
+                <div className="row" style={{ marginTop: '0.6rem' }}>
+                  <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoUpload} />
+                </div>
+                <div className="prefix-logo-preview">
+                  <img src={profile.logoDataUrl || brandLogoPath} alt="Company logo preview" />
+                </div>
+              </fieldset>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'payment' && (
+          <div className="group-box-stack">
+            <div className="group-box-grid">
+              <fieldset className="group-box">
+                <legend>Bank account details</legend>
+                <div className="form-grid two-col-simple">
+                  <label>
+                    Account holder name
+                    <input
+                      value={profile.paymentAccountName}
+                      onChange={(e) => setValue('paymentAccountName', e.target.value)}
+                      placeholder="Legal account holder name"
+                    />
+                  </label>
+                  <label>
+                    Financial institution
+                    <input
+                      value={profile.paymentInstitutionName}
+                      onChange={(e) => setValue('paymentInstitutionName', e.target.value)}
+                      placeholder="RBC, TD, BMO..."
+                    />
+                  </label>
+                  <label>
+                    Transit number
+                    <input
+                      value={profile.paymentTransitNumber}
+                      onChange={(e) => setValue('paymentTransitNumber', e.target.value)}
+                      placeholder="00011"
+                    />
+                  </label>
+                  <label>
+                    Account number
+                    <input
+                      value={profile.paymentAccountNumber}
+                      onChange={(e) => setValue('paymentAccountNumber', e.target.value)}
+                      placeholder="Account number"
+                    />
+                  </label>
+                  <label className="invoice-field-span">
+                    Payment email
+                    <input
+                      type="email"
+                      value={profile.paymentEmail}
+                      onChange={(e) => setValue('paymentEmail', e.target.value)}
+                      placeholder="payments@company.com"
+                    />
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset className="group-box">
+                <legend>Stripe keys</legend>
+                <div className="form-grid two-col-simple">
+                  <label>
+                    Stripe account ID
+                    <input
+                      value={profile.stripeAccountId}
+                      onChange={(e) => setValue('stripeAccountId', e.target.value)}
+                      placeholder="acct_..."
+                    />
+                  </label>
+                  <label>
+                    Stripe publishable key
+                    <input
+                      value={profile.stripePublishableKey}
+                      onChange={(e) => setValue('stripePublishableKey', e.target.value)}
+                      placeholder="pk_live_..."
+                    />
+                  </label>
+                  <label className="invoice-field-span">
+                    Stripe webhook secret
+                    <input
+                      value={profile.stripeWebhookSecret}
+                      onChange={(e) => setValue('stripeWebhookSecret', e.target.value)}
+                      placeholder="whsec_..."
+                    />
+                  </label>
+                </div>
+              </fieldset>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'security' && (
+          <div className="group-box-stack">
+            <fieldset className="group-box security-group-box">
+              <legend>Password change</legend>
+              <div className="security-password-stack">
+                <label>
+                  Current password
+                  <input
+                    type="password"
+                    value={passwordForm.currentPassword}
+                    onChange={(e) => setPasswordForm((prev) => ({ ...prev, currentPassword: e.target.value }))}
+                    placeholder="Current password"
+                  />
+                </label>
+                <label>
+                  New password
+                  <input
+                    type="password"
+                    value={passwordForm.newPassword}
+                    onChange={(e) => setPasswordForm((prev) => ({ ...prev, newPassword: e.target.value }))}
+                    placeholder="New password"
+                  />
+                </label>
+                <label>
+                  Confirm new password
+                  <input
+                    type="password"
+                    value={passwordForm.confirmPassword}
+                    onChange={(e) => setPasswordForm((prev) => ({ ...prev, confirmPassword: e.target.value }))}
+                    placeholder="Confirm new password"
+                  />
+                </label>
+                <div className="kpi-row">
+                  <span>Password strength rule</span>
+                  <strong>Min 8 chars, uppercase, number, symbol</strong>
+                </div>
+              </div>
+            </fieldset>
+          </div>
+        )}
       </div>
 
-      <div className="card">
-        <h3>Quick Compliance Check</h3>
-        <div className="kpi-list">
-          <div className="kpi-row">
-            <span>Business details complete</span>
-            <strong>
-              {profile.companyName && profile.email && profile.streetAddress.trim() && profile.city.trim()
-                ? 'Ready'
-                : 'Missing'}
-            </strong>
+      {activeTab === 'general' && (
+        <>
+          <div className="card">
+            <h3>Quick Compliance Check</h3>
+            <div className="kpi-list">
+              <div className="kpi-row">
+                <span>Business details complete</span>
+                <strong>
+                  {profile.companyName && profile.email && profile.streetAddress.trim() && profile.city.trim()
+                    ? 'Ready'
+                    : 'Missing'}
+                </strong>
+              </div>
+              <div className="kpi-row">
+                <span>GST/HST number set</span>
+                <strong>{profile.gstHstNumber ? 'Ready' : 'Missing'}</strong>
+              </div>
+              <div className="kpi-row">
+                <span>Brand logo set</span>
+                <strong>{profile.logoDataUrl ? 'Ready' : 'Optional'}</strong>
+              </div>
+            </div>
           </div>
-          <div className="kpi-row">
-            <span>GST/HST number set</span>
-            <strong>{profile.gstHstNumber ? 'Ready' : 'Missing'}</strong>
-          </div>
-          <div className="kpi-row">
-            <span>Brand logo set</span>
-            <strong>{profile.logoDataUrl ? 'Ready' : 'Optional'}</strong>
-          </div>
-        </div>
-      </div>
-
-      <div className="logo-upload card">
-        <h3>Company Logo</h3>
-        <p className="muted">Upload PNG/JPG logo for invoice preview and PDF export.</p>
-        <div className="row">
-          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoUpload} />
-        </div>
-        {profile.logoDataUrl && <img className="logo-preview" src={profile.logoDataUrl} alt="Company logo preview" />}
-      </div>
+        </>
+      )}
     </section>
   )
 }
@@ -1011,11 +1319,14 @@ function CatalogPage({
   catalog: CatalogItem[]
   setCatalog: (items: CatalogItem[]) => void
 }) {
-  const [name, setName] = useState('')
-  const [price, setPrice] = useState(0)
-  const [type, setType] = useState<CatalogItem['type']>('Service')
-  const [unit, setUnit] = useState<CatalogItem['unit']>('Hour')
-  const [taxRate, setTaxRate] = useState(13)
+  const [showAddItemModal, setShowAddItemModal] = useState(false)
+  const [newItem, setNewItem] = useState({
+    name: '',
+    defaultPrice: 0,
+    type: 'Service' as CatalogItem['type'],
+    unit: 'Hour' as CatalogItem['unit'],
+    taxRate: 13,
+  })
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editForm, setEditForm] = useState({
@@ -1026,19 +1337,25 @@ function CatalogPage({
     taxRate: 13,
   })
 
-  const addItem = () => {
-    if (!name.trim()) return
+  const saveNewItem = () => {
+    if (!newItem.name.trim()) return
     const next: CatalogItem = {
       id: Date.now(),
-      type,
-      name,
-      unit,
-      defaultPrice: price,
-      taxRate,
+      type: newItem.type,
+      name: newItem.name.trim(),
+      unit: newItem.unit,
+      defaultPrice: newItem.defaultPrice,
+      taxRate: newItem.taxRate,
     }
     setCatalog([...catalog, next])
-    setName('')
-    setPrice(0)
+    setShowAddItemModal(false)
+    setNewItem({
+      name: '',
+      defaultPrice: 0,
+      type: 'Service',
+      unit: 'Hour',
+      taxRate: 13,
+    })
   }
 
   const filteredCatalog = catalog.filter((item) =>
@@ -1094,45 +1411,29 @@ function CatalogPage({
           <p className="muted">Reusable price catalog for faster invoice drafting and fewer input errors.</p>
         </div>
       </div>
-      <div className="catalog-entry">
-        <input
-          className="field-name"
-          placeholder="Item/Service name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <input
-          className="field-price"
-          type="number"
-          placeholder="Default price"
-          value={price}
-          onChange={(e) => setPrice(Number(e.target.value))}
-        />
-        <select className="field-type" value={type} onChange={(e) => setType(e.target.value as CatalogItem['type'])}>
-          <option>Service</option>
-          <option>Product</option>
-        </select>
-        <select className="field-unit" value={unit} onChange={(e) => setUnit(e.target.value as CatalogItem['unit'])}>
-          <option>Hour</option>
-          <option>Unit</option>
-        </select>
-        <input
-          className="field-tax"
-          type="number"
-          placeholder="Tax %"
-          value={taxRate}
-          onChange={(e) => setTaxRate(Number(e.target.value))}
-        />
-        <button className="field-add" onClick={addItem}>
-          Add
-        </button>
-      </div>
-      <div className="row">
-        <input placeholder="Search in catalog" value={search} onChange={(e) => setSearch(e.target.value)} />
+
+      <div className="table-toolbar">
+        <div className="search-box compact">
+          <span className="search-icon">
+            <UiIcon name="search" />
+          </span>
+          <input placeholder="Search in catalog" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <div className="table-toolbar-actions">
+          <button type="button" className="primary icon-btn" title="Add item" aria-label="Add item" onClick={() => setShowAddItemModal(true)}>
+            +
+          </button>
+          <button type="button" className="icon-btn" title="Filters" aria-label="Filters">
+            <UiIcon name="filter" />
+          </button>
+          <button type="button" className="icon-btn" title="Columns" aria-label="Columns">
+            <UiIcon name="columns" />
+          </button>
+        </div>
       </div>
 
-      <div className="table">
-        <div className="table-row table-head-row">
+      <div className="data-grid table">
+        <div className="data-grid-head table-row table-head-row catalog-row">
           <strong>Name</strong>
           <strong>Type</strong>
           <strong>Unit</strong>
@@ -1142,16 +1443,18 @@ function CatalogPage({
         </div>
         {filteredCatalog.map((item) => (
           <div key={item.id} className="catalog-block">
-            <div className="table-row catalog-row">
+            <div className="data-grid-row table-row catalog-row">
               <span>{item.name}</span>
               <span>{item.type}</span>
               <span>{item.unit}</span>
               <span>${item.defaultPrice.toFixed(2)}</span>
               <span>{item.taxRate}%</span>
               <div className="row-actions">
-                <button onClick={() => startEdit(item)}>Quick Edit</button>
-                <button className="danger-btn" onClick={() => deleteItem(item.id)}>
-                  Delete
+                <button className="icon-btn" title="Edit Item" aria-label="Edit Item" onClick={() => startEdit(item)}>
+                  <UiIcon name="edit" />
+                </button>
+                <button className="icon-btn danger-btn" title="Delete Item" aria-label="Delete Item" onClick={() => deleteItem(item.id)}>
+                  <UiIcon name="trash" />
                 </button>
               </div>
             </div>
@@ -1216,7 +1519,74 @@ function CatalogPage({
           </div>
         ))}
         {!filteredCatalog.length && <p className="muted">No matching item found.</p>}
+        <div className="data-grid-footer table-footer">
+          <span className="muted">Rows per page: 10</span>
+          <span className="muted">
+            1 - {Math.min(filteredCatalog.length, 10)} of {filteredCatalog.length}
+          </span>
+        </div>
       </div>
+
+      {showAddItemModal && (
+        <div className="inline-modal-backdrop">
+          <div className="inline-modal">
+            <h3>Add Item / Service</h3>
+            <p className="muted">Create a new catalog entry from modal.</p>
+            <div className="form-grid">
+              <label>
+                Name
+                <input
+                  value={newItem.name}
+                  onChange={(e) => setNewItem((prev) => ({ ...prev, name: e.target.value }))}
+                  placeholder="Item/Service name"
+                />
+              </label>
+              <label>
+                Default Price
+                <input
+                  type="number"
+                  value={newItem.defaultPrice}
+                  onChange={(e) => setNewItem((prev) => ({ ...prev, defaultPrice: Number(e.target.value) || 0 }))}
+                />
+              </label>
+              <label>
+                Type
+                <select
+                  value={newItem.type}
+                  onChange={(e) => setNewItem((prev) => ({ ...prev, type: e.target.value as CatalogItem['type'] }))}
+                >
+                  <option>Service</option>
+                  <option>Product</option>
+                </select>
+              </label>
+              <label>
+                Unit
+                <select
+                  value={newItem.unit}
+                  onChange={(e) => setNewItem((prev) => ({ ...prev, unit: e.target.value as CatalogItem['unit'] }))}
+                >
+                  <option>Hour</option>
+                  <option>Unit</option>
+                </select>
+              </label>
+              <label>
+                Tax Rate (%)
+                <input
+                  type="number"
+                  value={newItem.taxRate}
+                  onChange={(e) => setNewItem((prev) => ({ ...prev, taxRate: Number(e.target.value) || 0 }))}
+                />
+              </label>
+            </div>
+            <div className="editor-actions">
+              <button className="primary" onClick={saveNewItem}>
+                Save
+              </button>
+              <button onClick={() => setShowAddItemModal(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -1724,18 +2094,27 @@ function CreateInvoicePage({
               </label>
               <label>
                 Province
-                <input
+                <select
                   value={newClient.province}
                   onChange={(e) => setNewClient((prev) => ({ ...prev, province: e.target.value }))}
-                  placeholder="ON"
-                />
+                >
+                  <option value="">Select</option>
+                  {CANADA_PROVINCES.map((province) => (
+                    <option key={province} value={province}>
+                      {province}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label>
                 Postal Code
                 <input
                   value={newClient.postalCode}
-                  onChange={(e) => setNewClient((prev) => ({ ...prev, postalCode: e.target.value }))}
-                  placeholder="M5J 2W4"
+                  onChange={(e) =>
+                    setNewClient((prev) => ({ ...prev, postalCode: normalizeCanadianPostalCode(e.target.value) }))
+                  }
+                  placeholder="A1A 1A1"
+                  maxLength={7}
                 />
               </label>
               <label>
@@ -1771,6 +2150,16 @@ function InvoicesPage({
   const [paymentChannel, setPaymentChannel] = useState<Record<string, InvoiceRecord['paymentChannel']>>({})
   const [invoiceSearch, setInvoiceSearch] = useState('')
   const [showPaymentPanel, setShowPaymentPanel] = useState(true)
+  const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null)
+  const [invoiceEditForm, setInvoiceEditForm] = useState({
+    client: '',
+    issueDate: '',
+    dueDate: '',
+    totalAmount: 0,
+    paidAmount: 0,
+    status: 'Draft' as InvoiceRecord['status'],
+    paymentChannel: 'Interac' as NonNullable<InvoiceRecord['paymentChannel']>,
+  })
 
   const applyPayment = (invoice: InvoiceRecord) => {
     const amount = paymentAmount[invoice.id] || 0
@@ -1797,6 +2186,44 @@ function InvoicesPage({
   const filteredInvoices = invoices.filter((invoice) =>
     `${invoice.invoiceNumber} ${invoice.client} ${invoice.status}`.toLowerCase().includes(invoiceSearch.toLowerCase()),
   )
+
+  const startInvoiceEdit = (invoice: InvoiceRecord) => {
+    setEditingInvoiceId(invoice.id)
+    setInvoiceEditForm({
+      client: invoice.client,
+      issueDate: invoice.issueDate,
+      dueDate: invoice.dueDate,
+      totalAmount: invoice.totalAmount,
+      paidAmount: invoice.paidAmount,
+      status: invoice.status,
+      paymentChannel: invoice.paymentChannel || 'Interac',
+    })
+  }
+
+  const cancelInvoiceEdit = () => {
+    setEditingInvoiceId(null)
+  }
+
+  const saveInvoiceEdit = () => {
+    if (!editingInvoiceId || !invoiceEditForm.client.trim()) return
+    setInvoices(
+      invoices.map((invoice) =>
+        invoice.id === editingInvoiceId
+          ? {
+              ...invoice,
+              client: invoiceEditForm.client.trim(),
+              issueDate: invoiceEditForm.issueDate,
+              dueDate: invoiceEditForm.dueDate,
+              totalAmount: Math.max(0, invoiceEditForm.totalAmount),
+              paidAmount: Math.max(0, Math.min(invoiceEditForm.paidAmount, invoiceEditForm.totalAmount)),
+              status: invoiceEditForm.status,
+              paymentChannel: invoiceEditForm.paymentChannel,
+            }
+          : invoice,
+      ),
+    )
+    setEditingInvoiceId(null)
+  }
 
   return (
     <section>
@@ -1837,37 +2264,67 @@ function InvoicesPage({
           <div className="page-head">
             <h3>Invoice Payments Workspace</h3>
           </div>
-          <div className="row">
-            <input
-              placeholder="Search invoices (number, client, status)"
-              value={invoiceSearch}
-              onChange={(e) => setInvoiceSearch(e.target.value)}
-            />
+          <div className="table-toolbar">
+            <div className="search-box compact">
+              <span className="search-icon">
+                <UiIcon name="search" />
+              </span>
+              <input
+                placeholder="Search invoices (number, client, status)"
+                value={invoiceSearch}
+                onChange={(e) => setInvoiceSearch(e.target.value)}
+              />
+            </div>
+            <div className="table-toolbar-actions">
+              <button type="button" className="icon-btn" title="Filters" aria-label="Filters">
+                <UiIcon name="filter" />
+              </button>
+              <button type="button" className="icon-btn" title="Columns" aria-label="Columns">
+                <UiIcon name="columns" />
+              </button>
+            </div>
           </div>
-          <div className="invoice-table">
-            <div className="invoice-table-head">
+          <div className="data-grid invoice-table">
+            <div className="data-grid-head invoice-table-head invoice-grid">
+              <span />
               <span>Invoice</span>
               <span>Client</span>
               <span>Status</span>
+              <span>Issue Date</span>
               <span>Due Date</span>
               <span>Total</span>
+              <span>Actions</span>
             </div>
             {filteredInvoices.map((invoice) => {
               const remaining = Math.max(0, invoice.totalAmount - invoice.paidAmount)
               return (
                 <div key={invoice.id} className="payment-row">
-                  <div className="invoice-table-row">
+                  <div className="data-grid-row invoice-table-row invoice-grid">
+                    <span>
+                      <input type="checkbox" />
+                    </span>
                     <span>{invoice.invoiceNumber}</span>
                     <span>{invoice.client}</span>
                     <span className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
+                    <span>{invoice.issueDate}</span>
                     <span>{invoice.dueDate}</span>
                     <strong>${invoice.totalAmount.toFixed(2)}</strong>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title={editingInvoiceId === invoice.id ? 'Close Edit' : 'Quick Edit'}
+                      aria-label={editingInvoiceId === invoice.id ? 'Close Edit' : 'Quick Edit'}
+                      onClick={() => (editingInvoiceId === invoice.id ? cancelInvoiceEdit() : startInvoiceEdit(invoice))}
+                    >
+                      <UiIcon name="edit" />
+                    </button>
                   </div>
                   <div className="payment-controls">
-                    <span className="muted">
+                    <span className="muted payment-meta">
                       Paid: ${invoice.paidAmount.toFixed(2)} | Remaining: ${remaining.toFixed(2)}
                     </span>
                     <select
+                      className="payment-channel-field"
                       value={paymentChannel[invoice.id] || 'Interac'}
                       onChange={(e) =>
                         setPaymentChannel((prev) => ({
@@ -1883,19 +2340,124 @@ function InvoicesPage({
                     </select>
                     <input
                       type="number"
+                      className="payment-amount-field"
                       value={paymentAmount[invoice.id] || 0}
                       onChange={(e) =>
                         setPaymentAmount((prev) => ({ ...prev, [invoice.id]: Number(e.target.value) || 0 }))
                       }
                       placeholder="Payment amount"
                     />
-                    <button className="primary" onClick={() => applyPayment(invoice)}>
-                      Mark Payment
-                    </button>
+                    <div className="payment-actions">
+                      <button className="primary icon-btn" onClick={() => applyPayment(invoice)} title="Mark Payment" aria-label="Mark Payment">
+                        <UiIcon name="check" />
+                      </button>
+                      {editingInvoiceId === invoice.id && (
+                        <button type="button" className="icon-btn" title="Save Edit" aria-label="Save Edit" onClick={saveInvoiceEdit}>
+                          <UiIcon name="save" />
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  {editingInvoiceId === invoice.id && (
+                    <div className="inline-editor">
+                      <div className="invoice-edit-grid">
+                        <label>
+                          Client
+                          <input
+                            value={invoiceEditForm.client}
+                            onChange={(e) => setInvoiceEditForm((prev) => ({ ...prev, client: e.target.value }))}
+                            placeholder="Client name"
+                          />
+                        </label>
+                        <label>
+                          Status
+                          <select
+                            value={invoiceEditForm.status}
+                            onChange={(e) =>
+                              setInvoiceEditForm((prev) => ({ ...prev, status: e.target.value as InvoiceRecord['status'] }))
+                            }
+                          >
+                            <option>Draft</option>
+                            <option>Open</option>
+                            <option>Partial</option>
+                            <option>Paid</option>
+                            <option>Overdue</option>
+                          </select>
+                        </label>
+                        <label>
+                          Issue Date
+                          <input
+                            type="date"
+                            value={invoiceEditForm.issueDate}
+                            onChange={(e) => setInvoiceEditForm((prev) => ({ ...prev, issueDate: e.target.value }))}
+                          />
+                        </label>
+                        <label>
+                          Due Date
+                          <input
+                            type="date"
+                            value={invoiceEditForm.dueDate}
+                            onChange={(e) => setInvoiceEditForm((prev) => ({ ...prev, dueDate: e.target.value }))}
+                          />
+                        </label>
+                        <label>
+                          Total Amount
+                          <input
+                            type="number"
+                            value={invoiceEditForm.totalAmount}
+                            onChange={(e) =>
+                              setInvoiceEditForm((prev) => ({ ...prev, totalAmount: Number(e.target.value) || 0 }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          Paid Amount
+                          <input
+                            type="number"
+                            value={invoiceEditForm.paidAmount}
+                            onChange={(e) =>
+                              setInvoiceEditForm((prev) => ({ ...prev, paidAmount: Number(e.target.value) || 0 }))
+                            }
+                          />
+                        </label>
+                        <label className="invoice-field-span">
+                          Payment Channel
+                          <select
+                            value={invoiceEditForm.paymentChannel}
+                            onChange={(e) =>
+                              setInvoiceEditForm((prev) => ({
+                                ...prev,
+                                paymentChannel: e.target.value as NonNullable<InvoiceRecord['paymentChannel']>,
+                              }))
+                            }
+                          >
+                            <option>Interac</option>
+                            <option>Bank Transfer</option>
+                            <option>Credit Card</option>
+                            <option>Cash</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div className="editor-actions">
+                        <button className="primary" type="button" onClick={saveInvoiceEdit}>
+                          Save
+                        </button>
+                        <button type="button" onClick={cancelInvoiceEdit}>
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )
             })}
+          </div>
+          <div className="data-grid-footer table-footer">
+            <span className="muted">Rows per page: 10</span>
+            <span className="muted">
+              1 - {Math.min(filteredInvoices.length, 10)} of {filteredInvoices.length}
+            </span>
           </div>
         </div>
       )}
@@ -2027,53 +2589,81 @@ function ClientsPage({
           <h2>Clients</h2>
           <p className="muted">Manage your client directory in a dedicated workspace.</p>
         </div>
-        <button className="primary" onClick={openAddClientModal}>
-          Add Client
-        </button>
       </div>
 
       <div className="card section-panel">
         <div className="clients-toolbar">
-          <div className="search-box">
-            <span className="search-icon">⌕</span>
+          <div className="search-box compact">
+            <span className="search-icon">
+              <UiIcon name="search" />
+            </span>
             <input
               placeholder="Search clients..."
               value={clientSearch}
               onChange={(e) => setClientSearch(e.target.value)}
             />
           </div>
-          <div className="sort-box">
-            <span className="sort-label">Sort</span>
-            <select value={clientSort} onChange={(e) => setClientSort(e.target.value as typeof clientSort)}>
-              <option value="name-asc">Name A-Z</option>
-              <option value="name-desc">Name Z-A</option>
-              <option value="invoice-desc">Highest Invoiced</option>
-            </select>
+          <div className="table-toolbar-actions">
+            <div className="sort-box">
+              <span className="sort-label">Sort</span>
+              <select value={clientSort} onChange={(e) => setClientSort(e.target.value as typeof clientSort)}>
+                <option value="name-asc">Name A-Z</option>
+                <option value="name-desc">Name Z-A</option>
+                <option value="invoice-desc">Highest Invoiced</option>
+              </select>
+            </div>
+            <button type="button" className="primary icon-btn" title="Add client" aria-label="Add client" onClick={openAddClientModal}>
+              +
+            </button>
+            <button type="button" className="icon-btn" title="Filters" aria-label="Filters">
+              <UiIcon name="filter" />
+            </button>
+            <button type="button" className="icon-btn" title="Columns" aria-label="Columns">
+              <UiIcon name="columns" />
+            </button>
           </div>
         </div>
 
-        <div className="table table-scroll">
-          <div className="table-row table-head-row client-row">
-            <strong>Name</strong>
-              <strong>Contact</strong>
+        <div className="data-grid table table-scroll">
+          <div className="data-grid-head table-row table-head-row client-row client-grid">
+            <strong />
+            <strong>Member</strong>
+            <strong>Client ID</strong>
             <strong>GST/HST</strong>
-              <strong>Address</strong>
+            <strong>Location</strong>
             <strong>Total</strong>
             <strong>Actions</strong>
           </div>
           {filteredClients.map((client) => (
-            <div key={client.id} className="table-row client-row">
-                <span>{client.name} - {client.company}</span>
-                <span>{client.email || '-'}{client.phone ? ` | ${client.phone}` : ''}</span>
+            <div key={client.id} className="data-grid-row table-row client-row client-grid">
+              <span>
+                <input type="checkbox" />
+              </span>
+              <span>
+                <strong>{client.name}</strong>
+                <br />
+                <span className="muted">{client.email || '-'}</span>
+              </span>
+              <span>{client.id.toUpperCase()}</span>
               <span>{client.gstHstNumber || '-'}</span>
-                <span>{client.streetAddress}, {client.city}, {client.province} {client.postalCode}</span>
+              <span>
+                {client.city}, {client.province}
+              </span>
               <strong>${client.totalInvoiced.toFixed(2)}</strong>
               <div className="row-actions">
-                <button onClick={() => openEditClientModal(client)}>Quick Edit</button>
+                <button className="icon-btn" title="Quick Edit" aria-label="Quick Edit" onClick={() => openEditClientModal(client)}>
+                  <UiIcon name="edit" />
+                </button>
               </div>
             </div>
           ))}
           {!filteredClients.length && <p className="muted">No client matched your search.</p>}
+        </div>
+        <div className="data-grid-footer table-footer">
+          <span className="muted">Rows per page: 10</span>
+          <span className="muted">
+            1 - {Math.min(filteredClients.length, 10)} of {filteredClients.length}
+          </span>
         </div>
       </div>
 
@@ -2134,18 +2724,27 @@ function ClientsPage({
               </label>
               <label>
                 Province
-                <input
+                <select
                   value={clientForm.province}
                   onChange={(e) => setClientForm((prev) => ({ ...prev, province: e.target.value }))}
-                  placeholder="ON"
-                />
+                >
+                  <option value="">Select</option>
+                  {CANADA_PROVINCES.map((province) => (
+                    <option key={province} value={province}>
+                      {province}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label>
                 Postal Code
                 <input
                   value={clientForm.postalCode}
-                  onChange={(e) => setClientForm((prev) => ({ ...prev, postalCode: e.target.value }))}
-                  placeholder="M5J 2W4"
+                  onChange={(e) =>
+                    setClientForm((prev) => ({ ...prev, postalCode: normalizeCanadianPostalCode(e.target.value) }))
+                  }
+                  placeholder="A1A 1A1"
+                  maxLength={7}
                 />
               </label>
               <label>

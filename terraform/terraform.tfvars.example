@@ -1,0 +1,8 @@
+aws_region            = "ca-central-1"
+root_domain           = "celsin.ca"
+app_subdomain         = "cinvoice"
+
+# Sensitive values: keep only in local tfvars or secure CI vars.
+stripe_secret_key     = "sk_live_xxxxxxxxxxxxxxxxx"
+stripe_webhook_secret = "whsec_xxxxxxxxxxxxxxxxx"
+jwt_secret            = "replace-with-long-random-secret"

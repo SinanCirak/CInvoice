@@ -8,7 +8,7 @@
 #   VITE_COGNITO_USER_POOL_CLIENT_ID
 # Optional:
 #   VITE_AWS_REGION           (default ca-central-1 in Vite env if unset)
-#   VITE_API_BASE_URL         (API Gateway invoke URL / prod stage)
+#   VITE_API_BASE_URL         (HTTP API invoke URL from Terraform — baked into the JS bundle at build time)
 #   CLOUDFRONT_DISTRIBUTION_ID (Terraform output cloudfront_distribution_id — skip invalidation if empty)
 
 name: Deploy site to S3

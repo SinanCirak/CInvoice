@@ -5,6 +5,10 @@ function apiBase(): string {
   return raw.replace(/\/$/, '')
 }
 
+/** Shown when the SPA was built without the API Gateway invoke URL. */
+export const MISSING_API_GATEWAY_URL =
+  'Add VITE_API_BASE_URL to the build (Terraform HTTP API invoke URL) so the browser can call Lambda.'
+
 export function isApiConfigured(): boolean {
   return apiBase().length > 0
 }
@@ -34,7 +38,7 @@ export async function fetchWorkspaceFromAws(): Promise<WorkspaceSnapshot | null>
 export async function putWorkspaceToAws(workspace: WorkspaceSnapshot): Promise<void> {
   const b = apiBase()
   if (!b) {
-    throw new Error('API base URL is not configured (VITE_API_BASE_URL).')
+    throw new Error(MISSING_API_GATEWAY_URL)
   }
   const token = await getIdToken()
   if (!token) {
@@ -61,6 +65,9 @@ export async function putStripeSettingsToAws(payload: {
   stripeWebhookSecret?: string
 }): Promise<void> {
   const b = apiBase()
+  if (!b) {
+    throw new Error(MISSING_API_GATEWAY_URL)
+  }
   const body: Record<string, string> = {}
   if (payload.stripeSecretKey?.trim()) body.stripeSecretKey = payload.stripeSecretKey.trim()
   if (payload.stripeWebhookSecret?.trim()) body.stripeWebhookSecret = payload.stripeWebhookSecret.trim()

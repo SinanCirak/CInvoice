@@ -1,6 +1,7 @@
 import {
   type ChangeEvent,
   type Dispatch,
+  type MutableRefObject,
   type SetStateAction,
   useCallback,
   useEffect,
@@ -10,6 +11,7 @@ import {
 } from 'react'
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
+  MISSING_API_GATEWAY_URL,
   fetchWorkspaceFromAws,
   isApiConfigured,
   putStripeSettingsToAws,
@@ -432,6 +434,8 @@ function App() {
   const [invoices, setInvoices] = useState(workspaceSeed.invoices)
   const [clients, setClients] = useState(workspaceSeed.clients)
   const [lastPdf, setLastPdf] = useState<LastPdfMeta | undefined>(workspaceSeed.lastPdf)
+  /** Shared with Create Invoice so after export we can reset auto invoice number. */
+  const invoiceNumberEditedRef = useRef(false)
 
   const location = useLocation()
   const navigate = useNavigate()
@@ -563,8 +567,50 @@ function App() {
     lastPdf,
   ])
 
-  const persistWorkspace = useCallback(async () => {
-    const snapshot: StoredWorkspaceV1 = {
+  const persistWorkspace = useCallback(
+    async (snapshotOverride?: StoredWorkspaceV1) => {
+      const snapshot: StoredWorkspaceV1 =
+        snapshotOverride ??
+        {
+          profile,
+          catalog,
+          draftLines,
+          clientName,
+          clientGstHstNumber,
+          meta,
+          invoices,
+          clients,
+          lastPdf,
+        }
+      const cloudOk =
+        isCognitoConfigured() && isApiConfigured() && authed && workspaceCloudReady
+      if (cloudOk) {
+        await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
+        return
+      }
+      if (!isCognitoConfigured()) {
+        try {
+          localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
+          localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
+        } catch {
+          throw new Error('Could not save to browser storage.')
+        }
+        return
+      }
+      if (!isApiConfigured()) {
+        throw new Error(MISSING_API_GATEWAY_URL)
+      }
+      if (!workspaceCloudReady) {
+        throw new Error('Workspace is still loading. Try again in a moment.')
+      }
+      if (!authed) {
+        throw new Error('Sign in to save.')
+      }
+      throw new Error('Cannot save workspace right now.')
+    },
+    [
+      authed,
+      workspaceCloudReady,
       profile,
       catalog,
       draftLines,
@@ -574,52 +620,15 @@ function App() {
       invoices,
       clients,
       lastPdf,
-    }
-    const cloudOk =
-      isCognitoConfigured() && isApiConfigured() && authed && workspaceCloudReady
-    if (cloudOk) {
-      await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
-      return
-    }
-    if (!isCognitoConfigured()) {
-      try {
-        localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
-        localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
-      } catch {
-        throw new Error('Could not save to browser storage.')
-      }
-      return
-    }
-    if (!isApiConfigured()) {
-      throw new Error('Set VITE_API_BASE_URL in this build to save to the server.')
-    }
-    if (!workspaceCloudReady) {
-      throw new Error('Workspace is still loading. Try again in a moment.')
-    }
-    if (!authed) {
-      throw new Error('Sign in to save.')
-    }
-    throw new Error('Cannot save workspace right now.')
-  }, [
-    authed,
-    workspaceCloudReady,
-    profile,
-    catalog,
-    draftLines,
-    clientName,
-    clientGstHstNumber,
-    meta,
-    invoices,
-    clients,
-    lastPdf,
-  ])
+    ],
+  )
 
   const workspaceSaveEnabled =
     !isCognitoConfigured() || (Boolean(authed) && workspaceCloudReady && isApiConfigured())
 
   const workspaceSaveHint =
     isCognitoConfigured() && !isApiConfigured()
-      ? 'Add VITE_API_BASE_URL to this build to save to the server.'
+      ? MISSING_API_GATEWAY_URL
       : isCognitoConfigured() && authed && !workspaceCloudReady
         ? 'Loading workspace…'
         : undefined
@@ -996,18 +1005,72 @@ function App() {
     const pdfBlob = doc.output('blob')
     doc.save(`${meta.invoiceNumber}.pdf`)
     const invoiceKey = meta.invoiceNumber.replace(/[^\w.-]+/g, '_').slice(0, 120)
+    let objectKey: string | null = null
     try {
-      const objectKey = await uploadInvoicePdfToS3IfConfigured(pdfBlob, invoiceKey || `inv-${Date.now()}`)
-      if (objectKey) {
-        setLastPdf({
+      objectKey = await uploadInvoicePdfToS3IfConfigured(pdfBlob, invoiceKey || `inv-${Date.now()}`)
+    } catch (err) {
+      console.warn('Invoice PDF S3 upload failed (invoice will still be saved to the workspace):', err)
+    }
+
+    const nextLastPdf: LastPdfMeta | undefined = objectKey
+      ? {
           objectKey,
           invoiceNumber: meta.invoiceNumber,
           exportedAt: new Date().toISOString(),
-        })
-      }
-    } catch (err) {
-      console.warn('Invoice PDF cloud upload skipped or failed:', err)
+        }
+      : lastPdf
+
+    const statusForRow: InvoiceRecord['status'] =
+      meta.status === 'Draft' ? 'Open' : (meta.status as InvoiceRecord['status'])
+
+    const newRecord: InvoiceRecord = {
+      id: `inv-${Date.now()}`,
+      invoiceNumber: meta.invoiceNumber.trim(),
+      client: clientName.trim() || 'Client',
+      issueDate: meta.issueDate,
+      dueDate: meta.dueDate,
+      totalAmount: Math.round(totals.grandTotal * 100) / 100,
+      paidAmount: 0,
+      status: statusForRow,
     }
+
+    const nextInvoices = [...invoices, newRecord]
+    const nextMeta = createInvoiceMetaFromProfile(profile, nextInvoices)
+
+    const snapshot: StoredWorkspaceV1 = {
+      profile,
+      catalog,
+      draftLines: [],
+      clientName,
+      clientGstHstNumber,
+      meta: nextMeta,
+      invoices: nextInvoices,
+      clients,
+      lastPdf: nextLastPdf,
+    }
+
+    if (isCognitoConfigured()) {
+      if (!isApiConfigured()) {
+        throw new Error(MISSING_API_GATEWAY_URL)
+      }
+      if (!authed || !workspaceCloudReady) {
+        throw new Error('Sign in and wait for workspace to load before recording an invoice.')
+      }
+      await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
+    } else {
+      try {
+        localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
+        localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
+      } catch {
+        throw new Error('Could not save to browser storage.')
+      }
+    }
+
+    setInvoices(nextInvoices)
+    setLastPdf(nextLastPdf)
+    setDraftLines([])
+    setMeta(nextMeta)
+    invoiceNumberEditedRef.current = false
   }
 
   if (!authChecked) {
@@ -1112,6 +1175,7 @@ function App() {
                   removeLine={removeLine}
                   totals={totals}
                   exportPdf={exportPdf}
+                  invoiceNumberEditedRef={invoiceNumberEditedRef}
                 />
               }
             />
@@ -1715,7 +1779,7 @@ function CompanyPage({
                   {isApiConfigured() && (
                     <div className="invoice-field-span" style={{ marginTop: 12 }}>
                       <p className="muted" style={{ fontSize: 13, marginBottom: 8, lineHeight: 1.45 }}>
-                        With <code>VITE_API_BASE_URL</code> set, the button below writes Stripe secrets to the server.
+                        When this app can reach your API Gateway, the button below writes Stripe secrets to the server.
                         The secret key field is only sent on that request and is not stored in the browser afterward.
                       </p>
                       <label>
@@ -2137,6 +2201,7 @@ function CreateInvoicePage({
   removeLine,
   totals,
   exportPdf,
+  invoiceNumberEditedRef,
 }: {
   clientName: string
   setClientName: (name: string) => void
@@ -2161,6 +2226,7 @@ function CreateInvoicePage({
     taxByRate: { rate: number; amount: number; label: string }[]
   }
   exportPdf: () => Promise<void>
+  invoiceNumberEditedRef: MutableRefObject<boolean>
 }) {
   const [clientQuery, setClientQuery] = useState(clientName)
   const [showClientOptions, setShowClientOptions] = useState(false)
@@ -2176,8 +2242,6 @@ function CreateInvoicePage({
     postalCode: '',
     gstHstNumber: '',
   })
-  const invoiceNumberEditedRef = useRef(false)
-
   useEffect(() => {
     if (invoiceNumberEditedRef.current) return
     setMeta((prev) => ({
@@ -2287,8 +2351,16 @@ function CreateInvoicePage({
           <h2>Create Invoice</h2>
           <p className="muted">Draft, edit, and export professional invoices with clear tax and payment terms.</p>
         </div>
-        <button className="primary" onClick={exportPdf}>
-          Export PDF
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            void exportPdf().catch((err) => {
+              window.alert(err instanceof Error ? err.message : 'Export failed')
+            })
+          }}
+        >
+          Export PDF & save invoice
         </button>
       </div>
       <div className="insight-banner">
@@ -2561,7 +2633,10 @@ function CreateInvoicePage({
             <span>Total Due</span>
             <strong>${totals.grandTotal.toFixed(2)}</strong>
           </div>
-          <p className="muted">Backend stage: persist invoice record in DynamoDB and PDF file in S3.</p>
+          <p className="muted">
+            Export uploads the PDF to S3 (via API presign) and saves the invoice row plus full workspace to DynamoDB
+            through API Gateway and Lambda.
+          </p>
         </aside>
       </div>
 

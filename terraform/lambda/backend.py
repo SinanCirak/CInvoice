@@ -1,8 +1,9 @@
 import base64
+import copy
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -17,6 +18,11 @@ INVOICE_BUCKET = os.environ["INVOICE_BUCKET"]
 SETTINGS_PK = os.environ["SETTINGS_PK"]
 SETTINGS_SK = os.environ["SETTINGS_SK"]
 COGNITO_APP_CLIENT_ID = os.environ["COGNITO_APP_CLIENT_ID"]
+
+# DynamoDB item hard limit ~400 KB; logo is stored separately in private S3.
+MAX_PAYLOAD_BYTES = 380_000
+
+WORKSPACE_SK = "WORKSPACE#v1"
 
 
 def _response(status: int, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -55,8 +61,129 @@ def _jwt_sub(event: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-def _workspace_s3_key(sub: str) -> str:
+def _legacy_workspace_json_key(sub: str) -> str:
     return f"workspace/{sub}/workspace.json"
+
+
+def _logo_object_key(sub: str) -> str:
+    return f"workspace/{sub}/logo"
+
+
+def _split_logo_from_workspace(workspace: Dict[str, Any]) -> Tuple[Dict[str, Any], bool, bytes, str]:
+    """Strip logo from JSON payload; return binary + content-type for private S3 object."""
+    w = copy.deepcopy(workspace)
+    profile = dict(w.get("profile") or {})
+    logo_url = profile.get("logoDataUrl") or ""
+    logo_bytes: Optional[bytes] = None
+    content_type = "image/png"
+
+    if isinstance(logo_url, str) and logo_url.startswith("data:"):
+        try:
+            meta, b64 = logo_url.split(",", 1)
+            if ";" in meta:
+                maybe_mime = meta[5 : meta.index(";")]
+                if maybe_mime.startswith("image/"):
+                    content_type = maybe_mime
+            logo_bytes = base64.b64decode(b64, validate=False)
+        except Exception:
+            logo_bytes = None
+
+    profile["logoDataUrl"] = ""
+    w["profile"] = profile
+    return w, bool(logo_bytes), logo_bytes or b"", content_type
+
+
+def _attach_logo_from_s3(sub: str, workspace: Dict[str, Any]) -> Dict[str, Any]:
+    out = copy.deepcopy(workspace)
+    try:
+        obj = s3.get_object(Bucket=INVOICE_BUCKET, Key=_logo_object_key(sub))
+        raw = obj["Body"].read()
+        ct = obj.get("ContentType") or "image/png"
+        b64 = base64.b64encode(raw).decode("ascii")
+        out.setdefault("profile", {})["logoDataUrl"] = f"data:{ct};base64,{b64}"
+    except ClientError:
+        pass
+    return out
+
+
+def _get_workspace(event: Dict[str, Any]) -> Dict[str, Any]:
+    sub = _jwt_sub(event)
+    if not sub:
+        return _response(401, {"message": "Unauthorized"})
+    table = dynamodb.Table(TABLE_NAME)
+    item = table.get_item(Key={"pk": f"USER#{sub}", "sk": WORKSPACE_SK}).get("Item")
+
+    if item and item.get("payload"):
+        try:
+            data = json.loads(str(item["payload"]))
+        except (json.JSONDecodeError, TypeError):
+            return _response(500, {"message": "Stored workspace is corrupt"})
+        if item.get("hasLogo"):
+            data = _attach_logo_from_s3(sub, data)
+        return _response(200, {"workspace": data, "storage": "dynamodb"})
+
+    # One-time read of legacy private S3 JSON (older deployments).
+    legacy_key = _legacy_workspace_json_key(sub)
+    try:
+        obj = s3.get_object(Bucket=INVOICE_BUCKET, Key=legacy_key)
+        raw = obj["Body"].read().decode("utf-8")
+        data = json.loads(raw)
+        return _response(200, {"workspace": data, "storage": "s3-legacy"})
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code", "") == "NoSuchKey":
+            return _response(200, {"workspace": None})
+        raise
+
+
+def _put_workspace(event: Dict[str, Any]) -> Dict[str, Any]:
+    sub = _jwt_sub(event)
+    if not sub:
+        return _response(401, {"message": "Unauthorized"})
+    payload = _read_json(event)
+    workspace = payload.get("workspace")
+    if workspace is None:
+        return _response(400, {"message": "Missing workspace"})
+
+    to_store, has_logo, logo_bytes, logo_ct = _split_logo_from_workspace(workspace)
+    if has_logo and logo_bytes:
+        s3.put_object(
+            Bucket=INVOICE_BUCKET,
+            Key=_logo_object_key(sub),
+            Body=logo_bytes,
+            ContentType=logo_ct,
+            ServerSideEncryption="AES256",
+        )
+    else:
+        try:
+            s3.delete_object(Bucket=INVOICE_BUCKET, Key=_logo_object_key(sub))
+        except ClientError:
+            pass
+
+    payload_str = json.dumps(to_store, separators=(",", ":"))
+    body_bytes = payload_str.encode("utf-8")
+    if len(body_bytes) > MAX_PAYLOAD_BYTES:
+        return _response(
+            413,
+            {
+                "message": "Workspace too large for DynamoDB after removing logo. Reduce history or contact support.",
+                "bytes": len(body_bytes),
+                "limit": MAX_PAYLOAD_BYTES,
+            },
+        )
+
+    table = dynamodb.Table(TABLE_NAME)
+    now = datetime.now(timezone.utc).isoformat()
+    table.put_item(
+        Item={
+            "pk": f"USER#{sub}",
+            "sk": WORKSPACE_SK,
+            "payload": payload_str,
+            "hasLogo": bool(has_logo and logo_bytes),
+            "updatedAt": now,
+            "bytes": len(body_bytes),
+        }
+    )
+    return _response(200, {"ok": True, "storage": "dynamodb", "updatedAt": now, "hasLogo": bool(has_logo and logo_bytes)})
 
 
 def _put_setting(key: str, value: str) -> None:
@@ -73,53 +200,6 @@ def _get_settings() -> Dict[str, Any]:
     table = dynamodb.Table(TABLE_NAME)
     item = table.get_item(Key={"pk": SETTINGS_PK, "sk": SETTINGS_SK}).get("Item", {})
     return item
-
-
-def _get_workspace(event: Dict[str, Any]) -> Dict[str, Any]:
-    sub = _jwt_sub(event)
-    if not sub:
-        return _response(401, {"message": "Unauthorized"})
-    key = _workspace_s3_key(sub)
-    try:
-        obj = s3.get_object(Bucket=INVOICE_BUCKET, Key=key)
-        raw = obj["Body"].read().decode("utf-8")
-        data = json.loads(raw)
-        return _response(200, {"workspace": data})
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code == "NoSuchKey":
-            return _response(200, {"workspace": None})
-        raise
-
-
-def _put_workspace(event: Dict[str, Any]) -> Dict[str, Any]:
-    sub = _jwt_sub(event)
-    if not sub:
-        return _response(401, {"message": "Unauthorized"})
-    payload = _read_json(event)
-    workspace = payload.get("workspace")
-    if workspace is None:
-        return _response(400, {"message": "Missing workspace"})
-    key = _workspace_s3_key(sub)
-    body_bytes = json.dumps(workspace).encode("utf-8")
-    s3.put_object(
-        Bucket=INVOICE_BUCKET,
-        Key=key,
-        Body=body_bytes,
-        ContentType="application/json",
-    )
-    table = dynamodb.Table(TABLE_NAME)
-    now = datetime.now(timezone.utc).isoformat()
-    table.put_item(
-        Item={
-            "pk": f"USER#{sub}",
-            "sk": "WORKSPACE#v1",
-            "s3Key": key,
-            "updatedAt": now,
-            "bytes": len(body_bytes),
-        }
-    )
-    return _response(200, {"ok": True, "s3Key": key, "updatedAt": now})
 
 
 def _route(event: Dict[str, Any]) -> Dict[str, Any]:

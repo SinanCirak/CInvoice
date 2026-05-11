@@ -26,6 +26,7 @@ dist-ssr
 # Terraform
 **/.terraform/*
 terraform/backend.zip
+**/lambda/__pycache__/
 *.tfstate
 *.tfstate.*
 terraform.tfvars

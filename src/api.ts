@@ -42,6 +42,11 @@ export async function putWorkspaceToAws(workspace: WorkspaceSnapshot): Promise<v
     body: JSON.stringify({ workspace }),
   })
   if (!res.ok) {
+    if (res.status === 413) {
+      throw new Error(
+        'Workspace is too large for DynamoDB (even without inline logo). Remove old data or split exports.',
+      )
+    }
     const text = await res.text().catch(() => '')
     throw new Error(text || `Workspace save failed: ${res.status}`)
   }

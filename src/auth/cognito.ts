@@ -1,7 +1,7 @@
 import { Amplify, type ResourcesConfig } from 'aws-amplify'
 import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito'
 import { fetchAuthSession, getCurrentUser, signIn, signOut } from 'aws-amplify/auth'
-import { CookieStorage } from 'aws-amplify/utils'
+import { CookieStorage, defaultStorage } from 'aws-amplify/utils'
 
 let configured = false
 
@@ -12,12 +12,19 @@ function buildAuthCookieStorage(): CookieStorage {
   const useDomain = Boolean(domain && host && !host.includes('localhost'))
   return new CookieStorage({
     path: '/',
-    /** Match Cognito app client refresh_token_validity (terraform: 30 days). */
     expires: 30,
     sameSite: 'lax',
     secure: isHttps,
     ...(useDomain ? { domain } : {}),
   })
+}
+
+function pickTokenStorage() {
+  // Cookie JWTs often exceed per-cookie limits in browsers; Amplify's default localStorage is more reliable.
+  if (import.meta.env.VITE_AUTH_TOKEN_STORAGE === 'cookie') {
+    return buildAuthCookieStorage()
+  }
+  return defaultStorage
 }
 
 function ensureConfigured() {
@@ -36,7 +43,7 @@ function ensureConfigured() {
   }
 
   cognitoUserPoolsTokenProvider.setAuthConfig(resourceConfig.Auth!)
-  cognitoUserPoolsTokenProvider.setKeyValueStorage(buildAuthCookieStorage())
+  cognitoUserPoolsTokenProvider.setKeyValueStorage(pickTokenStorage())
 
   Amplify.configure(resourceConfig, {
     Auth: {
@@ -97,15 +104,27 @@ export async function getAuthUserDisplay(): Promise<string | null> {
   }
 }
 
-/** Cognito ID token for API Gateway JWT authorizer (Bearer). Refreshes via refresh token when expired. */
+function tokenToString(token: unknown): string | null {
+  if (!token) return null
+  if (typeof token === 'string') return token
+  if (typeof token === 'object' && token !== null && 'toString' in token) {
+    return (token as { toString: () => string }).toString()
+  }
+  return null
+}
+
+/** ID token for API Gateway JWT authorizer (`aud` = app client id). Refreshes when expired. */
 export async function getIdToken(): Promise<string | null> {
   if (!isCognitoConfigured()) return null
   ensureConfigured()
   try {
-    const session = await fetchAuthSession()
-    const id = session.tokens?.idToken
-    if (!id) return null
-    return typeof id === 'string' ? id : id.toString()
+    let session = await fetchAuthSession()
+    let id = tokenToString(session.tokens?.idToken)
+    if (!id) {
+      session = await fetchAuthSession({ forceRefresh: true })
+      id = tokenToString(session.tokens?.idToken)
+    }
+    return id
   } catch {
     return null
   }

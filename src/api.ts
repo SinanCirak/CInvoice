@@ -33,9 +33,13 @@ export async function fetchWorkspaceFromAws(): Promise<WorkspaceSnapshot | null>
 
 export async function putWorkspaceToAws(workspace: WorkspaceSnapshot): Promise<void> {
   const b = apiBase()
-  if (!b) return
+  if (!b) {
+    throw new Error('API base URL is not configured (VITE_API_BASE_URL).')
+  }
   const token = await getIdToken()
-  if (!token) return
+  if (!token) {
+    throw new Error('Not signed in or session expired; sign in again to save.')
+  }
   const res = await fetch(`${b}/workspace`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },

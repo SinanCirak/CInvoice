@@ -1,4 +1,13 @@
-import { type ChangeEvent, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type ChangeEvent,
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
   fetchWorkspaceFromAws,
@@ -554,6 +563,67 @@ function App() {
     lastPdf,
   ])
 
+  const persistWorkspace = useCallback(async () => {
+    const snapshot: StoredWorkspaceV1 = {
+      profile,
+      catalog,
+      draftLines,
+      clientName,
+      clientGstHstNumber,
+      meta,
+      invoices,
+      clients,
+      lastPdf,
+    }
+    const cloudOk =
+      isCognitoConfigured() && isApiConfigured() && authed && workspaceCloudReady
+    if (cloudOk) {
+      await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
+      return
+    }
+    if (!isCognitoConfigured()) {
+      try {
+        localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
+        localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
+      } catch {
+        throw new Error('Could not save to browser storage.')
+      }
+      return
+    }
+    if (!isApiConfigured()) {
+      throw new Error('Set VITE_API_BASE_URL in this build to save to the server.')
+    }
+    if (!workspaceCloudReady) {
+      throw new Error('Workspace is still loading. Try again in a moment.')
+    }
+    if (!authed) {
+      throw new Error('Sign in to save.')
+    }
+    throw new Error('Cannot save workspace right now.')
+  }, [
+    authed,
+    workspaceCloudReady,
+    profile,
+    catalog,
+    draftLines,
+    clientName,
+    clientGstHstNumber,
+    meta,
+    invoices,
+    clients,
+    lastPdf,
+  ])
+
+  const workspaceSaveEnabled =
+    !isCognitoConfigured() || (Boolean(authed) && workspaceCloudReady && isApiConfigured())
+
+  const workspaceSaveHint =
+    isCognitoConfigured() && !isApiConfigured()
+      ? 'Add VITE_API_BASE_URL to this build to save to the server.'
+      : isCognitoConfigured() && authed && !workspaceCloudReady
+        ? 'Loading workspace…'
+        : undefined
+
   const totals = useMemo(() => {
     const subTotalRaw = draftLines.reduce((acc, line) => acc + line.quantity * line.customPrice, 0)
     const discountedSubTotal = Math.max(0, subTotalRaw - meta.discount)
@@ -1008,7 +1078,18 @@ function App() {
         <div className="page-wrap">
           <Routes>
             <Route path="/" element={<Dashboard invoices={invoices} />} />
-            <Route path="/company" element={<CompanyPage profile={profile} onChange={setProfile} />} />
+            <Route
+              path="/company"
+              element={
+                <CompanyPage
+                  profile={profile}
+                  onChange={setProfile}
+                  onSaveWorkspace={persistWorkspace}
+                  saveEnabled={workspaceSaveEnabled}
+                  saveHint={workspaceSaveHint}
+                />
+              }
+            />
             <Route path="/catalog" element={<CatalogPage catalog={catalog} setCatalog={setCatalog} />} />
             <Route
               path="/create-invoice"
@@ -1323,9 +1404,15 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
 function CompanyPage({
   profile,
   onChange,
+  onSaveWorkspace,
+  saveEnabled,
+  saveHint,
 }: {
   profile: CompanyProfile
   onChange: (profile: CompanyProfile) => void
+  onSaveWorkspace: () => Promise<void>
+  saveEnabled: boolean
+  saveHint?: string
 }) {
   const setValue = (key: keyof CompanyProfile, value: string) => {
     onChange({ ...profile, [key]: value })
@@ -1348,6 +1435,23 @@ function CompanyPage({
   const [stripeSecretDraft, setStripeSecretDraft] = useState('')
   const [cloudSyncBusy, setCloudSyncBusy] = useState(false)
   const [cloudSyncMsg, setCloudSyncMsg] = useState<string | null>(null)
+  const [workspaceSaveBusy, setWorkspaceSaveBusy] = useState(false)
+  const [workspaceSaveMsg, setWorkspaceSaveMsg] = useState<string | null>(null)
+
+  const handleSaveWorkspace = () => {
+    setWorkspaceSaveMsg(null)
+    setWorkspaceSaveBusy(true)
+    void (async () => {
+      try {
+        await onSaveWorkspace()
+        setWorkspaceSaveMsg('Saved.')
+      } catch (e) {
+        setWorkspaceSaveMsg(e instanceof Error ? e.message : 'Save failed')
+      } finally {
+        setWorkspaceSaveBusy(false)
+      }
+    })()
+  }
 
   return (
     <section>
@@ -1356,11 +1460,21 @@ function CompanyPage({
           <h2>Settings</h2>
           <p className="muted">Manage company profile, payout setup, Stripe connection, and security preferences.</p>
         </div>
-        <p className="muted" style={{ margin: 0, textAlign: 'right', maxWidth: '22rem', lineHeight: 1.45 }}>
-          {isCognitoConfigured() && isApiConfigured()
-            ? 'Changes are saved to your account on the server shortly after you stop editing.'
-            : 'Configure Cognito and the API URL in this build for cloud sync.'}
-        </p>
+        <div className="company-save-actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={!saveEnabled || workspaceSaveBusy}
+            onClick={handleSaveWorkspace}
+          >
+            {workspaceSaveBusy ? 'Saving…' : 'Save'}
+          </button>
+          {(workspaceSaveMsg || (saveHint && !saveEnabled)) && (
+            <p className="muted company-save-feedback" role="status">
+              {workspaceSaveMsg ?? saveHint}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="card">

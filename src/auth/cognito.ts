@@ -1,53 +1,24 @@
-import { Amplify, type ResourcesConfig } from 'aws-amplify'
-import { cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito'
+import { Amplify } from 'aws-amplify'
 import { fetchAuthSession, getCurrentUser, signIn, signOut } from 'aws-amplify/auth'
-import { CookieStorage, defaultStorage } from 'aws-amplify/utils'
 
 let configured = false
 
-function buildAuthCookieStorage(): CookieStorage {
-  const host = typeof window !== 'undefined' ? window.location.hostname : ''
-  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:'
-  const domain = import.meta.env.VITE_AUTH_COOKIE_DOMAIN?.trim()
-  const useDomain = Boolean(domain && host && !host.includes('localhost'))
-  return new CookieStorage({
-    path: '/',
-    expires: 30,
-    sameSite: 'lax',
-    secure: isHttps,
-    ...(useDomain ? { domain } : {}),
-  })
-}
-
-function pickTokenStorage() {
-  // Cookie JWTs often exceed per-cookie limits in browsers; Amplify's default localStorage is more reliable.
-  if (import.meta.env.VITE_AUTH_TOKEN_STORAGE === 'cookie') {
-    return buildAuthCookieStorage()
-  }
-  return defaultStorage
-}
-
+/**
+ * Single-arg configure so Amplify wires Cognito token storage + credentials the supported way
+ * (passing only tokenProvider in libraryOptions skips that path and breaks sessions for some builds).
+ */
 function ensureConfigured() {
   if (configured) return
   const poolId = import.meta.env.VITE_COGNITO_USER_POOL_ID?.trim()
   const clientId = import.meta.env.VITE_COGNITO_USER_POOL_CLIENT_ID?.trim()
   if (!poolId || !clientId) return
 
-  const resourceConfig: ResourcesConfig = {
+  Amplify.configure({
     Auth: {
       Cognito: {
         userPoolId: poolId,
         userPoolClientId: clientId,
       },
-    },
-  }
-
-  cognitoUserPoolsTokenProvider.setAuthConfig(resourceConfig.Auth!)
-  cognitoUserPoolsTokenProvider.setKeyValueStorage(pickTokenStorage())
-
-  Amplify.configure(resourceConfig, {
-    Auth: {
-      tokenProvider: cognitoUserPoolsTokenProvider,
     },
   })
   configured = true
@@ -113,7 +84,7 @@ function tokenToString(token: unknown): string | null {
   return null
 }
 
-/** ID token for API Gateway JWT authorizer (`aud` = app client id). Refreshes when expired. */
+/** ID token for API Gateway JWT authorizer. */
 export async function getIdToken(): Promise<string | null> {
   if (!isCognitoConfigured()) return null
   ensureConfigured()

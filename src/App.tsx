@@ -86,27 +86,28 @@ type InvoiceMeta = {
 
 const APP_BRAND = 'CInvoice'
 
+/** Empty shell: real data comes from DynamoDB after sign-in (or localStorage only when Cognito is not configured). */
 const initialProfile: CompanyProfile = {
-  companyName: `${APP_BRAND} Studio`,
-  ownerName: 'Alex Carter',
-  email: 'billing@cinvoice.com',
-  phone: '+1 416 000 0000',
-  streetAddress: '101 King St W',
-  city: 'Toronto',
+  companyName: '',
+  ownerName: '',
+  email: '',
+  phone: '',
+  streetAddress: '',
+  city: '',
   province: 'ON',
   postalCode: '',
   logoDataUrl: '',
-  gstHstNumber: 'GST/HST-CA-4452',
+  gstHstNumber: '',
   invoiceNumberPrefix: 'INV',
   invoiceNumberYear: new Date().getFullYear().toString(),
-  paymentAccountName: 'CInvoice Studio Ltd.',
-  paymentInstitutionName: 'RBC Royal Bank',
-  paymentTransitNumber: '00011',
-  paymentAccountNumber: '4200567',
-  paymentEmail: 'payments@cinvoice.com',
-  stripeAccountId: 'acct_1NMock8pQ2s9',
-  stripePublishableKey: 'pk_live_51NMockxxxxxxxxxxxxxxxx',
-  stripeWebhookSecret: 'whsec_mock_xxxxxxxxxxxxxxxx',
+  paymentAccountName: '',
+  paymentInstitutionName: '',
+  paymentTransitNumber: '',
+  paymentAccountNumber: '',
+  paymentEmail: '',
+  stripeAccountId: '',
+  stripePublishableKey: '',
+  stripeWebhookSecret: '',
 }
 
 const PROFILE_STORAGE_KEY = 'cinvoice_company_profile_v1'
@@ -125,12 +126,6 @@ function readStoredCompanyProfile(): CompanyProfile {
     return initialProfile
   }
 }
-
-const initialCatalog: CatalogItem[] = [
-  { id: 1, type: 'Service', name: 'Web Development', unit: 'Hour', defaultPrice: 95, taxRate: 13 },
-  { id: 2, type: 'Service', name: 'UI/UX Design', unit: 'Hour', defaultPrice: 80, taxRate: 13 },
-  { id: 3, type: 'Product', name: 'Hosting Package', unit: 'Unit', defaultPrice: 45, taxRate: 13 },
-]
 
 const brandLogoPath = '/logo.png'
 
@@ -243,6 +238,15 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function formatUsd(n: number): string {
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+}
+
+function parseIssueDateMs(isoDay: string): number {
+  const t = Date.parse(`${isoDay}T12:00:00`)
+  return Number.isFinite(t) ? t : 0
+}
+
 function normalizeCanadianPostalCode(value: string): string {
   const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
   if (cleaned.length <= 3) return cleaned
@@ -290,99 +294,18 @@ function getNextInvoiceNumber(prefix: string, year: string, invoices: InvoiceRec
   return `${p}-${y}-${String(max + 1).padStart(3, '0')}`
 }
 
-const initialInvoices: InvoiceRecord[] = [
-  {
-    id: 'inv-1',
-    invoiceNumber: 'INV-2026-041',
-    client: 'Northwind Labs',
-    issueDate: '2026-04-10',
-    dueDate: '2026-04-20',
-    totalAmount: 1840,
-    paidAmount: 1840,
-    status: 'Paid',
-    paymentChannel: 'Interac',
-  },
-  {
-    id: 'inv-2',
-    invoiceNumber: 'INV-2026-042',
-    client: 'Apex Mechanical',
-    issueDate: '2026-04-12',
-    dueDate: '2026-04-28',
-    totalAmount: 2250,
-    paidAmount: 1000,
-    status: 'Partial',
-    paymentChannel: 'Bank Transfer',
-  },
-  {
-    id: 'inv-3',
-    invoiceNumber: 'INV-2026-043',
-    client: 'Summit Dental',
-    issueDate: '2026-04-15',
-    dueDate: '2026-05-02',
-    totalAmount: 920,
-    paidAmount: 0,
-    status: 'Open',
-  },
-]
-
-function createInvoiceMetaFromProfile(profile: CompanyProfile): InvoiceMeta {
+function createInvoiceMetaFromProfile(profile: CompanyProfile, invoices: InvoiceRecord[]): InvoiceMeta {
   return {
-    invoiceNumber: getNextInvoiceNumber(
-      profile.invoiceNumberPrefix,
-      profile.invoiceNumberYear,
-      initialInvoices,
-    ),
+    invoiceNumber: getNextInvoiceNumber(profile.invoiceNumberPrefix, profile.invoiceNumberYear, invoices),
     issueDate: new Date().toISOString().slice(0, 10),
     dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
     status: 'Draft',
-    paymentTerms: 'Payment due within 14 days by bank transfer or card.',
-    notes: 'Thanks for your business. Late fee: 1.5% monthly after due date.',
+    paymentTerms: '',
+    notes: '',
     discount: 0,
     shipping: 0,
   }
 }
-
-const initialClients: ClientRecord[] = [
-  {
-    id: 'cl-1',
-    name: 'Daniel Brooks',
-    email: 'daniel@northwindlabs.ca',
-    phone: '+1 416 222 1111',
-    company: 'Northwind Labs',
-    streetAddress: '220 Bay St',
-    city: 'Toronto',
-    province: 'ON',
-    postalCode: 'M5J 2W4',
-    gstHstNumber: 'GST/HST-CL-1001',
-    totalInvoiced: 1840,
-  },
-  {
-    id: 'cl-2',
-    name: 'Amanda Fox',
-    email: 'amanda@apexmech.ca',
-    phone: '+1 647 555 8922',
-    company: 'Apex Mechanical',
-    streetAddress: '14 Industrial Rd',
-    city: 'Mississauga',
-    province: 'ON',
-    postalCode: 'L5B 1M2',
-    gstHstNumber: 'GST/HST-CL-1002',
-    totalInvoiced: 2250,
-  },
-  {
-    id: 'cl-3',
-    name: 'Chris Lewis',
-    email: 'chris@summitdental.ca',
-    phone: '+1 905 123 7788',
-    company: 'Summit Dental',
-    streetAddress: '88 Main St N',
-    city: 'Brampton',
-    province: 'ON',
-    postalCode: 'L6V 1N6',
-    gstHstNumber: 'GST/HST-CL-1003',
-    totalInvoiced: 920,
-  },
-]
 
 const WORKSPACE_STORAGE_KEY = 'cinvoice_workspace_v1'
 
@@ -417,36 +340,34 @@ type LoadedWorkspaceState = {
 }
 
 function freshWorkspaceFromLegacyProfile(): LoadedWorkspaceState {
-  const profile = readStoredCompanyProfile()
+  const profile = isCognitoConfigured() ? { ...initialProfile } : readStoredCompanyProfile()
+  const emptyInv: InvoiceRecord[] = []
   return {
     profile,
-    catalog: [...initialCatalog],
+    catalog: [],
     draftLines: [],
-    clientName: 'Sample Client Inc.',
+    clientName: '',
     clientGstHstNumber: '',
-    meta: createInvoiceMetaFromProfile(profile),
-    invoices: [...initialInvoices],
-    clients: [...initialClients],
+    meta: createInvoiceMetaFromProfile(profile, emptyInv),
+    invoices: [],
+    clients: [],
   }
 }
 
 function normalizeWorkspace(parsed: StoredWorkspaceV1): LoadedWorkspaceState {
   const profile: CompanyProfile = { ...initialProfile, ...(parsed.profile ?? {}) }
-  const catalog: CatalogItem[] = Array.isArray(parsed.catalog) ? parsed.catalog : [...initialCatalog]
-  const invoices: InvoiceRecord[] = Array.isArray(parsed.invoices)
-    ? parsed.invoices
-    : [...initialInvoices]
-  const clients: ClientRecord[] = Array.isArray(parsed.clients) ? parsed.clients : [...initialClients]
+  const catalog: CatalogItem[] = Array.isArray(parsed.catalog) ? parsed.catalog : []
+  const invoices: InvoiceRecord[] = Array.isArray(parsed.invoices) ? parsed.invoices : []
+  const clients: ClientRecord[] = Array.isArray(parsed.clients) ? parsed.clients : []
   const draftLines: DraftInvoiceLine[] = Array.isArray(parsed.draftLines)
     ? parsed.draftLines
     : []
 
-  const clientName =
-    typeof parsed.clientName === 'string' ? parsed.clientName : 'Sample Client Inc.'
+  const clientName = typeof parsed.clientName === 'string' ? parsed.clientName : ''
   const clientGstHstNumber =
     typeof parsed.clientGstHstNumber === 'string' ? parsed.clientGstHstNumber : ''
 
-  const seededMeta = createInvoiceMetaFromProfile(profile)
+  const seededMeta = createInvoiceMetaFromProfile(profile, invoices)
   const metaPartial = parsed.meta && typeof parsed.meta === 'object' ? parsed.meta : {}
   const meta: InvoiceMeta = { ...seededMeta, ...metaPartial }
 
@@ -472,6 +393,9 @@ function normalizeWorkspace(parsed: StoredWorkspaceV1): LoadedWorkspaceState {
 
 function readWorkspaceInitialState(): LoadedWorkspaceState {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return freshWorkspaceFromLegacyProfile()
+  }
+  if (isCognitoConfigured()) {
     return freshWorkspaceFromLegacyProfile()
   }
   try {
@@ -559,6 +483,9 @@ function App() {
   }, [authed])
 
   useEffect(() => {
+    if (isCognitoConfigured()) {
+      return
+    }
     try {
       const snapshot: StoredWorkspaceV1 = {
         profile,
@@ -1063,10 +990,7 @@ function App() {
       <main className="content">
         <div className="page-wrap">
           <Routes>
-            <Route
-              path="/"
-              element={<Dashboard totalSales={52740} monthly={[1200, 2800, 3300, 4100, 5300, 6200, 7000]} />}
-            />
+            <Route path="/" element={<Dashboard invoices={invoices} />} />
             <Route path="/company" element={<CompanyPage profile={profile} onChange={setProfile} />} />
             <Route path="/catalog" element={<CatalogPage catalog={catalog} setCatalog={setCatalog} />} />
             <Route
@@ -1107,19 +1031,108 @@ function App() {
   )
 }
 
-function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: number[] }) {
-  const weeks = '$3,420'
-  const today = '$640'
-  const year = '$84,910'
-  const collectionRate = '92.4%'
-  const overdueAmount = '$2,180'
-  const taxReserve = '$9,460'
-  const recentInvoices = [
-    { no: 'INV-2026-041', client: 'Northwind Labs', status: 'Paid', due: '2026-04-20', amount: '$1,840' },
-    { no: 'INV-2026-042', client: 'Apex Mechanical', status: 'Open', due: '2026-04-28', amount: '$2,250' },
-    { no: 'INV-2026-043', client: 'Summit Dental', status: 'Draft', due: '2026-05-02', amount: '$920' },
-    { no: 'INV-2026-044', client: 'Urban Build Co', status: 'Overdue', due: '2026-04-18', amount: '$1,260' },
-  ]
+function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
+  const now = new Date()
+  const todayStr = now.toISOString().slice(0, 10)
+
+  const sortedByIssue = useMemo(
+    () => [...invoices].sort((a, b) => parseIssueDateMs(b.issueDate) - parseIssueDateMs(a.issueDate)),
+    [invoices],
+  )
+
+  const totalBilled = useMemo(() => invoices.reduce((a, i) => a + i.totalAmount, 0), [invoices])
+  const totalPaid = useMemo(() => invoices.reduce((a, i) => a + i.paidAmount, 0), [invoices])
+
+  const issuedToday = useMemo(
+    () => invoices.filter((i) => i.issueDate === todayStr).reduce((a, i) => a + i.totalAmount, 0),
+    [invoices, todayStr],
+  )
+
+  const thisWeekTotal = useMemo(() => {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0).getTime()
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime()
+    return invoices.reduce((acc, i) => {
+      const t = parseIssueDateMs(i.issueDate)
+      return t >= start && t <= end ? acc + i.totalAmount : acc
+    }, 0)
+  }, [invoices, now])
+
+  const weekCount = useMemo(() => {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0).getTime()
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime()
+    return invoices.filter((i) => {
+      const t = parseIssueDateMs(i.issueDate)
+      return t >= start && t <= end
+    }).length
+  }, [invoices, now])
+
+  const monthTotal = useMemo(() => {
+    const y = now.getFullYear()
+    const m = now.getMonth()
+    return invoices.reduce((acc, i) => {
+      const d = new Date(parseIssueDateMs(i.issueDate))
+      return d.getFullYear() === y && d.getMonth() === m ? acc + i.totalAmount : acc
+    }, 0)
+  }, [invoices, now])
+
+  const ytdTotal = useMemo(() => {
+    const y = now.getFullYear()
+    return invoices.reduce((acc, i) => {
+      const d = new Date(parseIssueDateMs(i.issueDate))
+      return d.getFullYear() === y ? acc + i.totalAmount : acc
+    }, 0)
+  }, [invoices, now])
+
+  const monthly = useMemo(() => {
+    const out: number[] = []
+    for (let back = 6; back >= 0; back--) {
+      const anchor = new Date(now.getFullYear(), now.getMonth() - back, 1)
+      const y = anchor.getFullYear()
+      const m = anchor.getMonth()
+      const sum = invoices.reduce((acc, inv) => {
+        const d = new Date(parseIssueDateMs(inv.issueDate))
+        return d.getFullYear() === y && d.getMonth() === m ? acc + inv.totalAmount : acc
+      }, 0)
+      out.push(sum)
+    }
+    return out
+  }, [invoices, now])
+
+  const monthLabels = useMemo(() => {
+    const labels: string[] = []
+    for (let back = 6; back >= 0; back--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - back, 1)
+      labels.push(d.toLocaleString('en-CA', { month: 'short' }))
+    }
+    return labels
+  }, [now])
+
+  const maxMonthly = useMemo(() => Math.max(...monthly, 1), [monthly])
+
+  const collectionRate =
+    totalBilled > 0 ? `${Math.round((totalPaid / totalBilled) * 1000) / 10}%` : '—'
+
+  const overdueExposure = useMemo(
+    () =>
+      invoices
+        .filter((i) => i.status === 'Overdue')
+        .reduce((a, i) => a + Math.max(0, i.totalAmount - i.paidAmount), 0),
+    [invoices],
+  )
+
+  const recentRows = useMemo(
+    () =>
+      sortedByIssue.slice(0, 8).map((inv) => ({
+        no: inv.invoiceNumber,
+        client: inv.client,
+        status: inv.status,
+        due: inv.dueDate,
+        amount: formatUsd(inv.totalAmount),
+      })),
+    [sortedByIssue],
+  )
+
+  const hasData = invoices.length > 0
 
   return (
     <section>
@@ -1129,8 +1142,12 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
           <p className="muted">Quick snapshot of cashflow, outstanding work, and next actions.</p>
         </div>
         <div className="row">
-          <button className="ghost">Export</button>
-          <button className="primary">New Invoice</button>
+          <button type="button" className="ghost">
+            Export
+          </button>
+          <NavLink to="/create-invoice" className="primary">
+            New Invoice
+          </NavLink>
         </div>
       </div>
 
@@ -1151,24 +1168,26 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
 
       <div className="stats-grid">
         <article className="card kpi-card">
-          <p className="muted">Today Collected</p>
-          <h3>{today}</h3>
-          <p className="tiny kpi-up">+8.2% vs yesterday</p>
+          <p className="muted">Issued today</p>
+          <h3>{formatUsd(issuedToday)}</h3>
+          <p className="tiny">{hasData ? 'Total amount on invoices dated today' : 'No invoices yet'}</p>
         </article>
         <article className="card kpi-card">
-          <p className="muted">This Week</p>
-          <h3>{weeks}</h3>
-          <p className="tiny">14 invoices issued</p>
+          <p className="muted">This week</p>
+          <h3>{formatUsd(thisWeekTotal)}</h3>
+          <p className="tiny">
+            {weekCount === 0 && !hasData ? 'Last 7 days' : `${weekCount} invoice${weekCount === 1 ? '' : 's'} in the last 7 days`}
+          </p>
         </article>
         <article className="card kpi-card">
-          <p className="muted">Monthly Revenue</p>
-          <h3>${totalSales.toLocaleString()}</h3>
-          <p className="tiny">Target: $60,000</p>
+          <p className="muted">This month</p>
+          <h3>{formatUsd(monthTotal)}</h3>
+          <p className="tiny">Billed in the current calendar month</p>
         </article>
         <article className="card kpi-card">
-          <p className="muted">Year-to-Date</p>
-          <h3>{year}</h3>
-          <p className="tiny">Forecast: $110,000</p>
+          <p className="muted">Year-to-date</p>
+          <h3>{formatUsd(ytdTotal)}</h3>
+          <p className="tiny">Billed so far this calendar year</p>
         </article>
       </div>
 
@@ -1180,14 +1199,19 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
           </div>
           <div className="bars">
             {monthly.map((value, i) => (
-              <div key={value + i} className="bar-wrap">
-                <div className="bar" style={{ height: `${Math.round(value / 80)}px` }} />
-                <span>M{i + 1}</span>
+              <div key={`${monthLabels[i]}-${i}`} className="bar-wrap">
+                <div
+                  className="bar"
+                  style={{ height: `${Math.max(4, Math.round((value / maxMonthly) * 72))}px` }}
+                />
+                <span>{monthLabels[i]}</span>
               </div>
             ))}
           </div>
           <p className="muted" style={{ marginTop: '0.6rem' }}>
-            Stable growth. Biggest uplift comes from recurring service invoices.
+            {hasData
+              ? 'Totals use each invoice issue date and billed amount.'
+              : 'Create invoices to see a seven-month trend from your workspace.'}
           </p>
         </div>
         <div className="card">
@@ -1201,27 +1225,35 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
               <strong>{collectionRate}</strong>
             </div>
             <div className="kpi-row">
-              <span>Overdue Exposure</span>
-              <strong className="danger">{overdueAmount}</strong>
+              <span>Overdue exposure</span>
+              <strong className="danger">{formatUsd(overdueExposure)}</strong>
             </div>
             <div className="kpi-row">
-              <span>Tax Reserve</span>
-              <strong>{taxReserve}</strong>
+              <span>Tax reserve</span>
+              <strong>—</strong>
             </div>
           </div>
           <div className="milestone-list" style={{ marginTop: '0.7rem' }}>
             <div className="milestone-row">
-              <span className="dot done" />
+              <span className={`dot ${hasData ? 'done' : 'progress'}`} />
               <div>
-                <strong>Send 3 reminders</strong>
-                <p className="muted">Open invoices nearing due date.</p>
+                <strong>{hasData ? 'Keep invoices current' : 'Set up company profile'}</strong>
+                <p className="muted">
+                  {hasData
+                    ? 'Paid amounts vs totals feed the collection rate above.'
+                    : 'Add your business details under Company, then create your first invoice.'}
+                </p>
               </div>
             </div>
             <div className="milestone-row">
               <span className="dot progress" />
               <div>
-                <strong>Review tax snapshot</strong>
-                <p className="muted">Reserve is above threshold this week.</p>
+                <strong>{hasData ? 'Follow up on overdue' : 'Build your catalog'}</strong>
+                <p className="muted">
+                  {hasData
+                    ? 'Overdue exposure uses unpaid balance on overdue invoices.'
+                    : 'Line items can be saved in Catalog for faster invoicing.'}
+                </p>
               </div>
             </div>
           </div>
@@ -1230,10 +1262,10 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
 
       <div className="card data-grid">
         <div className="page-head">
-          <h3>Recent Invoices</h3>
-          <button className="icon-btn" title="View all invoices" aria-label="View all invoices">
+          <h3>Recent invoices</h3>
+          <NavLink to="/invoices" className="icon-btn" title="View all invoices" aria-label="View all invoices">
             <UiIcon name="view" />
-          </button>
+          </NavLink>
         </div>
         <div className="invoice-table">
           <div className="invoice-table-head dashboard-invoice-grid">
@@ -1243,15 +1275,21 @@ function Dashboard({ totalSales, monthly }: { totalSales: number; monthly: numbe
             <span>Due Date</span>
             <span>Amount</span>
           </div>
-          {recentInvoices.map((invoice) => (
-            <div key={invoice.no} className="invoice-table-row dashboard-invoice-grid">
-              <span>{invoice.no}</span>
-              <span>{invoice.client}</span>
-              <span className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
-              <span>{invoice.due}</span>
-              <strong>{invoice.amount}</strong>
-            </div>
-          ))}
+          {recentRows.length === 0 ? (
+            <p className="muted" style={{ padding: '1rem 0.5rem' }}>
+              No invoices yet. Use New Invoice to add your first record; it is stored in your cloud workspace.
+            </p>
+          ) : (
+            recentRows.map((invoice) => (
+              <div key={invoice.no} className="invoice-table-row dashboard-invoice-grid">
+                <span>{invoice.no}</span>
+                <span>{invoice.client}</span>
+                <span className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
+                <span>{invoice.due}</span>
+                <strong>{invoice.amount}</strong>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </section>

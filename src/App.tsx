@@ -13,6 +13,7 @@ import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'reac
 import {
   MISSING_API_GATEWAY_URL,
   fetchWorkspaceFromAws,
+  getInvoicePdfDownloadUrl,
   isApiConfigured,
   putStripeSettingsToAws,
   putWorkspaceToAws,
@@ -68,6 +69,8 @@ type InvoiceRecord = {
   paidAmount: number
   status: 'Draft' | 'Open' | 'Partial' | 'Paid' | 'Overdue'
   paymentChannel?: 'Interac' | 'Bank Transfer' | 'Credit Card' | 'Cash'
+  /** S3 object key for this invoice PDF (same pattern as CTrackr fileKey on Dynamo items). */
+  pdfObjectKey?: string
 }
 
 type ClientRecord = {
@@ -1032,6 +1035,7 @@ function App() {
       totalAmount: Math.round(totals.grandTotal * 100) / 100,
       paidAmount: 0,
       status: statusForRow,
+      ...(objectKey ? { pdfObjectKey: objectKey } : {}),
     }
 
     const nextInvoices = [...invoices, newRecord]
@@ -2634,8 +2638,8 @@ function CreateInvoicePage({
             <strong>${totals.grandTotal.toFixed(2)}</strong>
           </div>
           <p className="muted">
-            Export uploads the PDF to S3 (via API presign) and saves the invoice row plus full workspace to DynamoDB
-            through API Gateway and Lambda.
+            Same pattern as CTrackr: PDF bytes go to S3 (presigned PUT); invoice fields and{' '}
+            <code>pdfObjectKey</code> live in DynamoDB inside your workspace payload (Lambda on PUT /workspace).
           </p>
         </aside>
       </div>
@@ -2951,6 +2955,23 @@ function InvoicesPage({
                       placeholder="Payment amount"
                     />
                     <div className="payment-actions">
+                      {invoice.pdfObjectKey && isApiConfigured() ? (
+                        <button
+                          type="button"
+                          className="ghost"
+                          style={{ fontSize: '0.78rem', padding: '0.35rem 0.55rem' }}
+                          title="Open PDF from S3"
+                          onClick={() => {
+                            void (async () => {
+                              const url = await getInvoicePdfDownloadUrl(invoice.pdfObjectKey!)
+                              if (url) window.open(url, '_blank', 'noopener,noreferrer')
+                              else window.alert('Could not open PDF link. Try signing in again.')
+                            })()
+                          }}
+                        >
+                          PDF
+                        </button>
+                      ) : null}
                       <button className="primary icon-btn" onClick={() => applyPayment(invoice)} title="Mark Payment" aria-label="Mark Payment">
                         <UiIcon name="check" />
                       </button>

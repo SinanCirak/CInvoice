@@ -385,7 +385,9 @@ resource "aws_iam_role_policy" "lambda" {
         Effect = "Allow"
         Action = [
           "s3:PutObject",
-          "s3:GetObject"
+          "s3:GetObject",
+          "s3:HeadObject",
+          "s3:DeleteObject"
         ]
         Resource = "${aws_s3_bucket.invoices.arn}/*"
       }
@@ -508,6 +510,41 @@ resource "aws_apigatewayv2_route" "post_invoices_presign" {
   target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
   authorization_type = "JWT"
   authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "post_invoices_download_url" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "POST /invoices/download-url"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+# Split from aws_apigatewayv2_route.routes for_each — adopt existing route IDs in state
+# instead of destroy+create (avoids brief API breakage and scary plan output).
+moved {
+  from = aws_apigatewayv2_route.routes["POST /auth/login"]
+  to   = aws_apigatewayv2_route.post_auth_login
+}
+
+moved {
+  from = aws_apigatewayv2_route.routes["GET /settings/stripe"]
+  to   = aws_apigatewayv2_route.get_settings_stripe
+}
+
+moved {
+  from = aws_apigatewayv2_route.routes["PUT /settings/stripe"]
+  to   = aws_apigatewayv2_route.put_settings_stripe
+}
+
+moved {
+  from = aws_apigatewayv2_route.routes["POST /invoices/presign"]
+  to   = aws_apigatewayv2_route.post_invoices_presign
+}
+
+moved {
+  from = aws_apigatewayv2_route.routes["POST /stripe/webhook"]
+  to   = aws_apigatewayv2_route.post_stripe_webhook
 }
 
 resource "aws_apigatewayv2_stage" "prod" {

@@ -112,3 +112,19 @@ export async function uploadInvoicePdfToS3IfConfigured(pdfBlob: Blob, invoiceId:
   }
   return data.objectKey ?? null
 }
+
+/** Presigned GET for a PDF the user already uploaded (key must be under invoices/<sub>/). */
+export async function getInvoicePdfDownloadUrl(objectKey: string): Promise<string | null> {
+  const b = apiBase()
+  if (!b) return null
+  const token = await getIdToken()
+  if (!token) return null
+  const res = await fetch(`${b}/invoices/download-url`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ objectKey }),
+  })
+  if (!res.ok) return null
+  const data = (await res.json()) as { downloadUrl?: string }
+  return data.downloadUrl ?? null
+}

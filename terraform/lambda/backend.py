@@ -275,6 +275,26 @@ def _route(event: Dict[str, Any]) -> Dict[str, Any]:
             },
         )
 
+    if method == "POST" and path.endswith("/invoices/download-url"):
+        sub = _jwt_sub(event)
+        if not sub:
+            return _response(401, {"message": "Unauthorized"})
+        payload = _read_json(event)
+        key = str(payload.get("objectKey") or "").strip()
+        prefix = f"invoices/{sub}/"
+        if not key.startswith(prefix) or ".." in key or key.endswith("/"):
+            return _response(403, {"message": "Invalid object key"})
+        try:
+            s3.head_object(Bucket=INVOICE_BUCKET, Key=key)
+        except ClientError:
+            return _response(404, {"message": "PDF not found in storage"})
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": INVOICE_BUCKET, "Key": key},
+            ExpiresIn=3600,
+        )
+        return _response(200, {"downloadUrl": url})
+
     if method == "POST" and path.endswith("/stripe/webhook"):
         return _response(200, {"received": True})
 

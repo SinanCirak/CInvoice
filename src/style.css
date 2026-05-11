@@ -31,7 +31,43 @@ body {
 .app-shell {
   display: grid;
   grid-template-columns: 270px 1fr;
+  grid-template-rows: auto 1fr;
   min-height: 100vh;
+}
+
+.app-topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 0.42rem 1rem;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+.app-topbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.app-user-display {
+  font-size: 0.84rem;
+  color: #475569;
+  max-width: min(360px, 70vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-signout-btn {
+  white-space: nowrap;
 }
 
 .sidebar {
@@ -40,10 +76,17 @@ body {
   border-right: 1px solid #e2e8f0;
   color: #334155;
   position: sticky;
+  align-self: start;
   top: 0;
-  height: 100vh;
+  max-height: 100vh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+.app-shell:has(.app-topbar) .sidebar {
+  top: 48px;
+  max-height: calc(100vh - 48px);
 }
 
 .brand {
@@ -115,10 +158,12 @@ body {
 
 .content {
   padding: 1rem 1.25rem 2rem;
+  min-width: 0;
 }
 
 .page-wrap {
   max-width: 1360px;
+  min-width: 0;
 }
 
 .topbar,
@@ -1245,6 +1290,14 @@ button:focus-visible {
 @media (max-width: 1120px) {
   .app-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr;
+  }
+
+  .app-shell:has(.app-topbar) .sidebar {
+    position: relative;
+    top: 0;
+    max-height: none;
+    overflow-y: visible;
   }
 
   .stats-grid,
@@ -1409,12 +1462,27 @@ button:focus-visible {
   font-size: 0.95rem;
 }
 
-.sidebar-signout {
-  margin-top: auto;
-  padding: 0.75rem 0.45rem 0;
-  border-top: 1px solid #eef2f7;
+/* Link-styled controls (match button.primary / .ghost for layout) */
+a.primary,
+a.ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  box-sizing: border-box;
+  cursor: pointer;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  padding: 0.62rem 1rem;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  width: auto;
 }
 
-.sidebar-signout button {
-  width: 100%;
+a.primary {
+  border: 1px solid #2a63d7;
+}
+
+a.ghost {
+  border: 1px solid #d2def0;
 }

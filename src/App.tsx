@@ -7,7 +7,7 @@ import {
   putWorkspaceToAws,
   uploadInvoicePdfToS3IfConfigured,
 } from './api'
-import { checkSignedIn, isCognitoConfigured, signOutUser } from './auth/cognito'
+import { checkSignedIn, getAuthUserDisplay, isCognitoConfigured, signOutUser } from './auth/cognito'
 import LoginPage from './LoginPage'
 
 type CompanyProfile = {
@@ -443,9 +443,25 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!authed || !isCognitoConfigured()) {
+      setAuthUserDisplay(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      const label = await getAuthUserDisplay()
+      if (!cancelled) setAuthUserDisplay(label)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [authed])
+
   const [workspaceCloudReady, setWorkspaceCloudReady] = useState(
     () => !isApiConfigured() || !isCognitoConfigured(),
   )
+  const [authUserDisplay, setAuthUserDisplay] = useState<string | null>(null)
 
   useEffect(() => {
     if (!authed || !isApiConfigured() || !isCognitoConfigured()) {
@@ -896,19 +912,15 @@ function App() {
 
     const footerY = PH - 8
     const totalPages = doc.getNumberOfPages()
-    const tagLineBefore = 'Generated with '
     for (let p = 1; p <= totalPages; p++) {
       doc.setPage(p)
       doc.setFont('helvetica', 'normal')
       doc.setFontSize(8)
       doc.setTextColor(148, 163, 184)
       doc.text(`Page ${p} of ${totalPages}`, PW - mR, footerY, { align: 'right' })
-      let fx = mL
-      doc.text(tagLineBefore, fx, footerY)
-      fx += doc.getTextWidth(tagLineBefore)
       doc.setFont('helvetica', 'bold')
       doc.setTextColor(100, 116, 130)
-      doc.text(APP_BRAND, fx, footerY)
+      doc.text(APP_BRAND, mL, footerY)
     }
 
     const pdfBlob = doc.output('blob')
@@ -948,6 +960,29 @@ function App() {
 
   return (
     <div className="app-shell">
+      {isCognitoConfigured() && authed && (
+        <header className="app-topbar">
+          <div className="app-topbar-inner">
+            <span className="app-user-display" title={authUserDisplay ?? undefined}>
+              {authUserDisplay ?? '…'}
+            </span>
+            <button
+              type="button"
+              className="ghost app-signout-btn"
+              onClick={() => {
+                void (async () => {
+                  await signOutUser()
+                  setAuthed(false)
+                  setAuthUserDisplay(null)
+                  navigate('/login', { replace: true })
+                })()
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </header>
+      )}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-badge brand-logo-box">
@@ -955,7 +990,6 @@ function App() {
           </span>
           <div>
             <h1>{APP_BRAND}</h1>
-            <p className="muted">Billing Workspace</p>
           </div>
         </div>
         <nav>
@@ -968,23 +1002,6 @@ function App() {
           <NavLink to="/clients">Clients</NavLink>
           <NavLink to="/company">Settings</NavLink>
         </nav>
-        {isCognitoConfigured() && authed && (
-          <div className="sidebar-signout">
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => {
-                void (async () => {
-                  await signOutUser()
-                  setAuthed(false)
-                  navigate('/login', { replace: true })
-                })()
-              }}
-            >
-              Sign out
-            </button>
-          </div>
-        )}
       </aside>
 
       <main className="content">
@@ -1032,6 +1049,7 @@ function App() {
 }
 
 function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
+  const navigate = useNavigate()
   const now = new Date()
   const todayStr = now.toISOString().slice(0, 10)
 
@@ -1145,9 +1163,9 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
           <button type="button" className="ghost">
             Export
           </button>
-          <NavLink to="/create-invoice" className="primary">
+          <button type="button" className="primary" onClick={() => navigate('/create-invoice')}>
             New Invoice
-          </NavLink>
+          </button>
         </div>
       </div>
 
@@ -1263,9 +1281,15 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
       <div className="card data-grid">
         <div className="page-head">
           <h3>Recent invoices</h3>
-          <NavLink to="/invoices" className="icon-btn" title="View all invoices" aria-label="View all invoices">
+          <button
+            type="button"
+            className="icon-btn"
+            title="View all invoices"
+            aria-label="View all invoices"
+            onClick={() => navigate('/invoices')}
+          >
             <UiIcon name="view" />
-          </NavLink>
+          </button>
         </div>
         <div className="invoice-table">
           <div className="invoice-table-head dashboard-invoice-grid">
@@ -1332,8 +1356,10 @@ function CompanyPage({
           <h2>Settings</h2>
           <p className="muted">Manage company profile, payout setup, Stripe connection, and security preferences.</p>
         </div>
-        <p className="muted" style={{ margin: 0, textAlign: 'right', maxWidth: '22rem', lineHeight: 1.4 }}>
-          Invoices, catalog, clients, and draft edits save automatically in this browser (trial / local demo).
+        <p className="muted" style={{ margin: 0, textAlign: 'right', maxWidth: '22rem', lineHeight: 1.45 }}>
+          {isCognitoConfigured() && isApiConfigured()
+            ? 'Changes are saved to your account on the server shortly after you stop editing.'
+            : 'Configure Cognito and the API URL in this build for cloud sync.'}
         </p>
       </div>
 
@@ -1409,12 +1435,12 @@ function CompanyPage({
                     <input
                       value={profile.streetAddress}
                       onChange={(e) => setValue('streetAddress', e.target.value)}
-                      placeholder="e.g. 101 King St W"
+                      placeholder="Street address"
                     />
                   </label>
                   <label>
                     City
-                    <input value={profile.city} onChange={(e) => setValue('city', e.target.value)} placeholder="Toronto" />
+                    <input value={profile.city} onChange={(e) => setValue('city', e.target.value)} placeholder="City" />
                   </label>
                   <label>
                     Province / state
@@ -1514,7 +1540,7 @@ function CompanyPage({
                     <input
                       value={profile.paymentInstitutionName}
                       onChange={(e) => setValue('paymentInstitutionName', e.target.value)}
-                      placeholder="RBC, TD, BMO..."
+                      placeholder="Bank or credit union"
                     />
                   </label>
                   <label>
@@ -1575,9 +1601,8 @@ function CompanyPage({
                   {isApiConfigured() && (
                     <div className="invoice-field-span" style={{ marginTop: 12 }}>
                       <p className="muted" style={{ fontSize: 13, marginBottom: 8, lineHeight: 1.45 }}>
-                        API base URL is set (<code>VITE_API_BASE_URL</code>). Webhook and publishable keys stay in this
-                        browser; use the button below to copy Stripe <strong>secrets</strong> into DynamoDB via the
-                        backend. Secret key is not saved to local storage—only sent on this action.
+                        With <code>VITE_API_BASE_URL</code> set, the button below writes Stripe secrets to the server.
+                        The secret key field is only sent on that request and is not stored in the browser afterward.
                       </p>
                       <label>
                         Stripe secret key (optional, server only)
@@ -2239,7 +2264,7 @@ function CreateInvoicePage({
                 <input
                   value={meta.invoiceNumber}
                   onChange={(e) => updateMeta('invoiceNumber', e.target.value)}
-                  placeholder="INV-2026-001"
+                  placeholder={`INV-${new Date().getFullYear()}-001`}
                 />
                 {numberAlreadyUsed && (
                   <span className="muted" style={{ color: '#b45309', display: 'block', marginTop: 6, fontSize: 12 }}>
@@ -2511,7 +2536,7 @@ function CreateInvoicePage({
                 <input
                   value={newClient.gstHstNumber}
                   onChange={(e) => setNewClient((prev) => ({ ...prev, gstHstNumber: e.target.value }))}
-                  placeholder="GST/HST-CLIENT-0001"
+                  placeholder="GST/HST number (if applicable)"
                 />
               </label>
             </div>
@@ -2651,7 +2676,7 @@ function InvoicesPage({
       {showPaymentPanel && (
         <div className="card section-panel">
           <div className="page-head">
-            <h3>Invoice Payments Workspace</h3>
+            <h3>Record payments</h3>
           </div>
           <div className="table-toolbar">
             <div className="search-box compact">
@@ -3141,7 +3166,7 @@ function ClientsPage({
                 <input
                   value={clientForm.gstHstNumber}
                   onChange={(e) => setClientForm((prev) => ({ ...prev, gstHstNumber: e.target.value }))}
-                  placeholder="GST/HST-CLIENT-0001"
+                  placeholder="GST/HST number (if applicable)"
                 />
               </label>
             </div>

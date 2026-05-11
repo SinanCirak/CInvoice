@@ -52,6 +52,24 @@ export async function signOutUser(): Promise<void> {
   }
 }
 
+/** Display name for header (email from ID token, else Cognito username). */
+export async function getAuthUserDisplay(): Promise<string | null> {
+  if (!isCognitoConfigured()) return null
+  ensureConfigured()
+  try {
+    const user = await getCurrentUser()
+    const session = await fetchAuthSession()
+    const payload = session.tokens?.idToken?.payload as Record<string, unknown> | undefined
+    const email = typeof payload?.email === 'string' ? payload.email.trim() : ''
+    if (email) return email
+    const preferred = typeof payload?.preferred_username === 'string' ? payload.preferred_username.trim() : ''
+    if (preferred) return preferred
+    return user.username?.trim() || null
+  } catch {
+    return null
+  }
+}
+
 /** Cognito ID token for API Gateway JWT authorizer (Bearer). */
 export async function getIdToken(): Promise<string | null> {
   if (!isCognitoConfigured()) return null

@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from 'react'
-import { signInWithEmail, isAuthEnforced } from './auth/cognito'
+import { isCognitoConfigured, signInWithEmail } from './auth/cognito'
 
 const brandLogoPath = '/logo.png'
 const APP_BRAND = 'CInvoice'
@@ -10,13 +10,15 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const enforced = isAuthEnforced()
+  const cognitoReady = isCognitoConfigured()
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setError(null)
-    if (!enforced) {
-      setError('Cognito is not configured. Set VITE_COGNITO_USER_POOL_ID and VITE_COGNITO_USER_POOL_CLIENT_ID for production builds.')
+    if (!cognitoReady) {
+      setError(
+        'Cognito is not configured in this build. Set VITE_COGNITO_USER_POOL_ID and VITE_COGNITO_USER_POOL_CLIENT_ID (for example in .env.local when developing, or GitHub Actions secrets for deploys), then restart / rebuild.',
+      )
       return
     }
     setBusy(true)
@@ -45,11 +47,12 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
           </div>
         </div>
 
-        {!enforced && (
+        {!cognitoReady && (
           <p className="muted" style={{ fontSize: 14, lineHeight: 1.5 }}>
-            Cognito env vars are missing, so the app runs in <strong>open</strong> mode locally. Add{' '}
-            <code>VITE_COGNITO_USER_POOL_ID</code>, <code>VITE_COGNITO_USER_POOL_CLIENT_ID</code>, and optional{' '}
-            <code>VITE_AWS_REGION</code> to require login.
+            This build is missing <code>VITE_COGNITO_USER_POOL_ID</code> and{' '}
+            <code>VITE_COGNITO_USER_POOL_CLIENT_ID</code>. Local and production behave the same: add the same
+            variables you use in production to your local <code>.env.local</code> if you run <code>npm run dev</code>{' '}
+            here.
           </p>
         )}
 
@@ -62,7 +65,7 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              disabled={!enforced || busy}
+              disabled={!cognitoReady || busy}
             />
           </label>
           <label>
@@ -73,7 +76,7 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              disabled={!enforced || busy}
+              disabled={!cognitoReady || busy}
             />
           </label>
           {error && (
@@ -81,7 +84,7 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
               {error}
             </p>
           )}
-          <button type="submit" className="primary login-submit" disabled={!enforced || busy}>
+          <button type="submit" className="primary login-submit" disabled={!cognitoReady || busy}>
             {busy ? 'Signing in…' : 'Sign in'}
           </button>
         </form>

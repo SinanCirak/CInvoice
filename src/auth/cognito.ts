@@ -1,5 +1,5 @@
 import { Amplify } from 'aws-amplify'
-import { getCurrentUser, signIn, signOut } from 'aws-amplify/auth'
+import { fetchAuthSession, getCurrentUser, signIn, signOut } from 'aws-amplify/auth'
 
 let configured = false
 
@@ -19,14 +19,15 @@ function ensureConfigured() {
   configured = true
 }
 
-export function isAuthEnforced(): boolean {
+/** Pool + app client present in the build (same expectation locally and in production). */
+export function isCognitoConfigured(): boolean {
   return Boolean(
     import.meta.env.VITE_COGNITO_USER_POOL_ID?.trim() && import.meta.env.VITE_COGNITO_USER_POOL_CLIENT_ID?.trim(),
   )
 }
 
 export async function checkSignedIn(): Promise<boolean> {
-  if (!isAuthEnforced()) return true
+  if (!isCognitoConfigured()) return false
   ensureConfigured()
   try {
     await getCurrentUser()
@@ -42,11 +43,21 @@ export async function signInWithEmail(email: string, password: string): Promise<
 }
 
 export async function signOutUser(): Promise<void> {
-  if (!isAuthEnforced()) return
+  if (!isCognitoConfigured()) return
   ensureConfigured()
   try {
     await signOut()
   } catch {
     /* already signed out */
   }
+}
+
+/** Cognito ID token for API Gateway JWT authorizer (Bearer). */
+export async function getIdToken(): Promise<string | null> {
+  if (!isCognitoConfigured()) return null
+  ensureConfigured()
+  const session = await fetchAuthSession()
+  const id = session.tokens?.idToken
+  if (!id) return null
+  return typeof id === 'string' ? id : id.toString()
 }

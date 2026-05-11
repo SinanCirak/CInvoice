@@ -431,10 +431,24 @@ resource "aws_apigatewayv2_api" "http" {
   protocol_type = "HTTP"
 
   cors_configuration {
-    allow_origins = ["https://${local.app_domain}"]
+    allow_origins = [
+      "https://${local.app_domain}",
+      "http://localhost:5173",
+    ]
     allow_methods = ["GET", "POST", "PUT", "OPTIONS"]
     allow_headers = ["*"]
     max_age       = 3600
+  }
+}
+
+resource "aws_apigatewayv2_authorizer" "cognito_jwt" {
+  api_id           = aws_apigatewayv2_api.http.id
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name             = "cognito-jwt"
+  jwt_configuration {
+    audience = [aws_cognito_user_pool_client.web.id]
+    issuer   = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.main.id}"
   }
 }
 
@@ -446,18 +460,54 @@ resource "aws_apigatewayv2_integration" "lambda" {
   payload_format_version = "2.0"
 }
 
-resource "aws_apigatewayv2_route" "routes" {
-  for_each = toset([
-    "POST /auth/login",
-    "GET /settings/stripe",
-    "PUT /settings/stripe",
-    "POST /invoices/presign",
-    "POST /stripe/webhook"
-  ])
-
+# Public routes (no JWT)
+resource "aws_apigatewayv2_route" "post_auth_login" {
   api_id    = aws_apigatewayv2_api.http.id
-  route_key = each.value
+  route_key = "POST /auth/login"
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_route" "post_stripe_webhook" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "POST /stripe/webhook"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_route" "get_settings_stripe" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "GET /settings/stripe"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_route" "put_settings_stripe" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "PUT /settings/stripe"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+# JWT-protected routes (Cognito ID token as Bearer)
+resource "aws_apigatewayv2_route" "get_workspace" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "GET /workspace"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "put_workspace" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "PUT /workspace"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "post_invoices_presign" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "POST /invoices/presign"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
 }
 
 resource "aws_apigatewayv2_stage" "prod" {

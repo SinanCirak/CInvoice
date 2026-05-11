@@ -2,7 +2,7 @@ import base64
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -46,6 +46,19 @@ def _mask_secret(value: str) -> str:
     return visible + "*" * max(len(value) - 5, 8)
 
 
+def _jwt_sub(event: Dict[str, Any]) -> Optional[str]:
+    try:
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        sub = claims.get("sub")
+        return str(sub) if sub else None
+    except (KeyError, TypeError):
+        return None
+
+
+def _workspace_s3_key(sub: str) -> str:
+    return f"workspace/{sub}/workspace.json"
+
+
 def _put_setting(key: str, value: str) -> None:
     table = dynamodb.Table(TABLE_NAME)
     table.update_item(
@@ -60,6 +73,53 @@ def _get_settings() -> Dict[str, Any]:
     table = dynamodb.Table(TABLE_NAME)
     item = table.get_item(Key={"pk": SETTINGS_PK, "sk": SETTINGS_SK}).get("Item", {})
     return item
+
+
+def _get_workspace(event: Dict[str, Any]) -> Dict[str, Any]:
+    sub = _jwt_sub(event)
+    if not sub:
+        return _response(401, {"message": "Unauthorized"})
+    key = _workspace_s3_key(sub)
+    try:
+        obj = s3.get_object(Bucket=INVOICE_BUCKET, Key=key)
+        raw = obj["Body"].read().decode("utf-8")
+        data = json.loads(raw)
+        return _response(200, {"workspace": data})
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "NoSuchKey":
+            return _response(200, {"workspace": None})
+        raise
+
+
+def _put_workspace(event: Dict[str, Any]) -> Dict[str, Any]:
+    sub = _jwt_sub(event)
+    if not sub:
+        return _response(401, {"message": "Unauthorized"})
+    payload = _read_json(event)
+    workspace = payload.get("workspace")
+    if workspace is None:
+        return _response(400, {"message": "Missing workspace"})
+    key = _workspace_s3_key(sub)
+    body_bytes = json.dumps(workspace).encode("utf-8")
+    s3.put_object(
+        Bucket=INVOICE_BUCKET,
+        Key=key,
+        Body=body_bytes,
+        ContentType="application/json",
+    )
+    table = dynamodb.Table(TABLE_NAME)
+    now = datetime.now(timezone.utc).isoformat()
+    table.put_item(
+        Item={
+            "pk": f"USER#{sub}",
+            "sk": "WORKSPACE#v1",
+            "s3Key": key,
+            "updatedAt": now,
+            "bytes": len(body_bytes),
+        }
+    )
+    return _response(200, {"ok": True, "s3Key": key, "updatedAt": now})
 
 
 def _route(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -84,6 +144,12 @@ def _route(event: Dict[str, Any]) -> Dict[str, Any]:
         except ClientError as exc:
             return _response(401, {"message": "Invalid credentials", "error": str(exc)})
 
+    if method == "GET" and path.endswith("/workspace"):
+        return _get_workspace(event)
+
+    if method == "PUT" and path.endswith("/workspace"):
+        return _put_workspace(event)
+
     if method == "GET" and path.endswith("/settings/stripe"):
         settings = _get_settings()
         return _response(
@@ -103,9 +169,13 @@ def _route(event: Dict[str, Any]) -> Dict[str, Any]:
         return _response(200, {"updated": True})
 
     if method == "POST" and path.endswith("/invoices/presign"):
+        sub = _jwt_sub(event)
+        if not sub:
+            return _response(401, {"message": "Unauthorized"})
         payload = _read_json(event)
         invoice_id = payload.get("invoiceId", f"inv-{int(datetime.now().timestamp())}")
-        key = f"invoices/{invoice_id}.pdf"
+        safe = "".join(c for c in str(invoice_id) if c.isalnum() or c in "._-")[:160] or f"inv-{int(datetime.now().timestamp())}"
+        key = f"invoices/{sub}/{safe}.pdf"
         presigned_put = s3.generate_presigned_url(
             "put_object",
             Params={"Bucket": INVOICE_BUCKET, "Key": key, "ContentType": "application/pdf"},
@@ -126,8 +196,6 @@ def _route(event: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     if method == "POST" and path.endswith("/stripe/webhook"):
-        # Signature verification is done using STRIPE_WEBHOOK_SECRET in real handler.
-        # Kept as stub here so secret remains backend-only.
         return _response(200, {"received": True})
 
     return _response(404, {"message": "Not found"})

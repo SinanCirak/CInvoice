@@ -1,7 +1,13 @@
 import { type ChangeEvent, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { isApiConfigured, putStripeSettingsToAws, uploadInvoicePdfToS3IfConfigured } from './api'
-import { checkSignedIn, isAuthEnforced, signOutUser } from './auth/cognito'
+import {
+  fetchWorkspaceFromAws,
+  isApiConfigured,
+  putStripeSettingsToAws,
+  putWorkspaceToAws,
+  uploadInvoicePdfToS3IfConfigured,
+} from './api'
+import { checkSignedIn, isCognitoConfigured, signOutUser } from './auth/cognito'
 import LoginPage from './LoginPage'
 
 type CompanyProfile = {
@@ -380,6 +386,12 @@ const initialClients: ClientRecord[] = [
 
 const WORKSPACE_STORAGE_KEY = 'cinvoice_workspace_v1'
 
+type LastPdfMeta = {
+  objectKey: string
+  invoiceNumber: string
+  exportedAt: string
+}
+
 type StoredWorkspaceV1 = {
   profile?: Partial<CompanyProfile>
   catalog?: CatalogItem[]
@@ -389,6 +401,7 @@ type StoredWorkspaceV1 = {
   meta?: Partial<InvoiceMeta>
   invoices?: InvoiceRecord[]
   clients?: ClientRecord[]
+  lastPdf?: LastPdfMeta
 }
 
 type LoadedWorkspaceState = {
@@ -400,6 +413,7 @@ type LoadedWorkspaceState = {
   meta: InvoiceMeta
   invoices: InvoiceRecord[]
   clients: ClientRecord[]
+  lastPdf?: LastPdfMeta
 }
 
 function freshWorkspaceFromLegacyProfile(): LoadedWorkspaceState {
@@ -436,6 +450,13 @@ function normalizeWorkspace(parsed: StoredWorkspaceV1): LoadedWorkspaceState {
   const metaPartial = parsed.meta && typeof parsed.meta === 'object' ? parsed.meta : {}
   const meta: InvoiceMeta = { ...seededMeta, ...metaPartial }
 
+  const lastPdf =
+    parsed.lastPdf &&
+    typeof parsed.lastPdf === 'object' &&
+    typeof (parsed.lastPdf as LastPdfMeta).objectKey === 'string'
+      ? (parsed.lastPdf as LastPdfMeta)
+      : undefined
+
   return {
     profile,
     catalog,
@@ -445,6 +466,7 @@ function normalizeWorkspace(parsed: StoredWorkspaceV1): LoadedWorkspaceState {
     meta,
     invoices,
     clients,
+    lastPdf,
   }
 }
 
@@ -476,6 +498,7 @@ function App() {
   const [meta, setMeta] = useState(workspaceSeed.meta)
   const [invoices, setInvoices] = useState(workspaceSeed.invoices)
   const [clients, setClients] = useState(workspaceSeed.clients)
+  const [lastPdf, setLastPdf] = useState<LastPdfMeta | undefined>(workspaceSeed.lastPdf)
 
   const location = useLocation()
   const navigate = useNavigate()
@@ -485,13 +508,6 @@ function App() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      if (!isAuthEnforced()) {
-        if (!cancelled) {
-          setAuthed(true)
-          setAuthChecked(true)
-        }
-        return
-      }
       const ok = await checkSignedIn()
       if (!cancelled) {
         setAuthed(ok)
@@ -502,6 +518,45 @@ function App() {
       cancelled = true
     }
   }, [])
+
+  const [workspaceCloudReady, setWorkspaceCloudReady] = useState(
+    () => !isApiConfigured() || !isCognitoConfigured(),
+  )
+
+  useEffect(() => {
+    if (!authed || !isApiConfigured() || !isCognitoConfigured()) {
+      setWorkspaceCloudReady(true)
+      return
+    }
+    let cancelled = false
+    setWorkspaceCloudReady(false)
+    void (async () => {
+      try {
+        const remote = await fetchWorkspaceFromAws()
+        if (cancelled) return
+        if (remote && typeof remote === 'object') {
+          const parsed = remote as StoredWorkspaceV1
+          const n = normalizeWorkspace(parsed)
+          setProfile(n.profile)
+          setCatalog(n.catalog)
+          setDraftLines(n.draftLines)
+          setClientName(n.clientName)
+          setClientGstHstNumber(n.clientGstHstNumber)
+          setMeta(n.meta)
+          setInvoices(n.invoices)
+          setClients(n.clients)
+          setLastPdf(n.lastPdf)
+        }
+      } catch (e) {
+        console.warn('Workspace cloud load failed', e)
+      } finally {
+        if (!cancelled) setWorkspaceCloudReady(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [authed])
 
   useEffect(() => {
     try {
@@ -514,13 +569,47 @@ function App() {
         meta,
         invoices,
         clients,
+        lastPdf,
       }
       localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
       localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
     } catch {
       /* quota or private mode */
     }
-  }, [profile, catalog, draftLines, clientName, clientGstHstNumber, meta, invoices, clients])
+  }, [profile, catalog, draftLines, clientName, clientGstHstNumber, meta, invoices, clients, lastPdf])
+
+  useEffect(() => {
+    if (!workspaceCloudReady || !isApiConfigured() || !isCognitoConfigured() || !authed) return
+    const t = window.setTimeout(() => {
+      const snapshot: StoredWorkspaceV1 = {
+        profile,
+        catalog,
+        draftLines,
+        clientName,
+        clientGstHstNumber,
+        meta,
+        invoices,
+        clients,
+        lastPdf,
+      }
+      void putWorkspaceToAws(snapshot as unknown as Record<string, unknown>).catch((err) => {
+        console.warn('Workspace cloud save failed', err)
+      })
+    }, 2000)
+    return () => window.clearTimeout(t)
+  }, [
+    workspaceCloudReady,
+    authed,
+    profile,
+    catalog,
+    draftLines,
+    clientName,
+    clientGstHstNumber,
+    meta,
+    invoices,
+    clients,
+    lastPdf,
+  ])
 
   const totals = useMemo(() => {
     const subTotalRaw = draftLines.reduce((acc, line) => acc + line.quantity * line.customPrice, 0)
@@ -898,25 +987,36 @@ function App() {
     const pdfBlob = doc.output('blob')
     doc.save(`${meta.invoiceNumber}.pdf`)
     const invoiceKey = meta.invoiceNumber.replace(/[^\w.-]+/g, '_').slice(0, 120)
-    void uploadInvoicePdfToS3IfConfigured(pdfBlob, invoiceKey || `inv-${Date.now()}`).catch((err) => {
+    try {
+      const objectKey = await uploadInvoicePdfToS3IfConfigured(pdfBlob, invoiceKey || `inv-${Date.now()}`)
+      if (objectKey) {
+        setLastPdf({
+          objectKey,
+          invoiceNumber: meta.invoiceNumber,
+          exportedAt: new Date().toISOString(),
+        })
+      }
+    } catch (err) {
       console.warn('Invoice PDF cloud upload skipped or failed:', err)
-    })
+    }
   }
 
   if (!authChecked) {
     return <div className="auth-loading">Loading…</div>
   }
 
-  if (isAuthEnforced()) {
-    if (!authed) {
-      if (location.pathname !== '/login') {
-        return <Navigate to="/login" replace />
-      }
-      return <LoginPage onSignedIn={() => setAuthed(true)} />
+  if (!authed) {
+    if (location.pathname !== '/login') {
+      return <Navigate to="/login" replace />
     }
-    if (location.pathname === '/login') {
-      return <Navigate to="/" replace />
-    }
+    return <LoginPage onSignedIn={() => setAuthed(true)} />
+  }
+  if (location.pathname === '/login') {
+    return <Navigate to="/" replace />
+  }
+
+  if (!workspaceCloudReady) {
+    return <div className="auth-loading">Loading workspace…</div>
   }
 
   return (
@@ -941,7 +1041,7 @@ function App() {
           <NavLink to="/clients">Clients</NavLink>
           <NavLink to="/company">Settings</NavLink>
         </nav>
-        {isAuthEnforced() && (
+        {isCognitoConfigured() && authed && (
           <div className="sidebar-signout">
             <button
               type="button"

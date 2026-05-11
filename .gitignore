@@ -25,6 +25,7 @@ dist-ssr
 
 # Terraform
 **/.terraform/*
+terraform/backend.zip
 *.tfstate
 *.tfstate.*
 terraform.tfvars

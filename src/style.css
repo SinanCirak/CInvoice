@@ -42,6 +42,8 @@ body {
   position: sticky;
   top: 0;
   height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .brand {
@@ -89,6 +91,7 @@ body {
 .sidebar nav {
   display: grid;
   gap: 0.5rem;
+  flex: 1;
 }
 
 .sidebar a {
@@ -1346,4 +1349,72 @@ button:focus-visible {
   .page-wrap {
     max-width: 100%;
   }
+}
+
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: var(--bg);
+}
+
+.login-card {
+  width: min(420px, 100%);
+  padding: 1.75rem;
+}
+
+.login-brand {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 1.25rem;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.login-form input {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+}
+
+.login-error {
+  color: #b91c1c;
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.login-submit {
+  margin-top: 0.25rem;
+}
+
+.auth-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.sidebar-signout {
+  margin-top: auto;
+  padding: 0.75rem 0.45rem 0;
+  border-top: 1px solid #eef2f7;
+}
+
+.sidebar-signout button {
+  width: 100%;
 }

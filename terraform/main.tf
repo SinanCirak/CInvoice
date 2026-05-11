@@ -1,5 +1,8 @@
 terraform {
-  required_version = ">= 1.6.0"
+  # Remote S3 backend is optional: start with default local state (terraform.tfstate in this dir).
+  # When the state bucket exists and you want remote state, rename backend-s3.tf.off → backend-s3.tf
+  # then: terraform init -migrate-state (see comments in that file).
+  required_version = ">= 1.10.0"
 
   required_providers {
     aws = {
@@ -10,14 +13,6 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.5"
     }
-  }
-
-  backend "s3" {
-    bucket         = "cinvoice-celsin-ca-tf-state-ca-central-1"
-    key            = "prod/cinvoice/terraform.tfstate"
-    region         = "ca-central-1"
-    dynamodb_table = "cinvoice-celsin-ca-tf-locks"
-    encrypt        = true
   }
 }
 
@@ -425,7 +420,6 @@ resource "aws_lambda_function" "backend" {
       SETTINGS_SK           = local.settings_sk
       COGNITO_USER_POOL_ID  = aws_cognito_user_pool.main.id
       COGNITO_APP_CLIENT_ID = aws_cognito_user_pool_client.web.id
-      AWS_REGION            = var.aws_region
     }
   }
 
@@ -500,6 +494,11 @@ output "invoice_bucket_name" {
 output "cloudfront_distribution_domain" {
   value       = aws_cloudfront_distribution.site.domain_name
   description = "CloudFront domain."
+}
+
+output "cloudfront_distribution_id" {
+  value       = aws_cloudfront_distribution.site.id
+  description = "CloudFront distribution ID (for cache invalidation after deploy)."
 }
 
 output "cognito_user_pool_id" {

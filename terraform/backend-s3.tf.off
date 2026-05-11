@@ -1,0 +1,18 @@
+# NOT loaded by Terraform (extension is not .tf). When you want remote state:
+#
+# 1) Ensure the bucket exists: cd bootstrap && terraform init && terraform apply
+# 2) Rename this file to backend-s3.tf (same directory as main.tf)
+# 3) From terraform/: terraform init -migrate-state
+#    (Terraform will offer to copy existing local state into S3)
+#
+# Locking: S3 native lockfile (.tflock), no DynamoDB table.
+
+terraform {
+  backend "s3" {
+    bucket       = "cinvoice-celsin-ca-tf-state-ca-central-1"
+    key          = "prod/cinvoice/terraform.tfstate"
+    region       = "ca-central-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

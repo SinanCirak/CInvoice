@@ -1,5 +1,8 @@
 import { type ChangeEvent, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react'
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { isApiConfigured, putStripeSettingsToAws, uploadInvoicePdfToS3IfConfigured } from './api'
+import { checkSignedIn, isAuthEnforced, signOutUser } from './auth/cognito'
+import LoginPage from './LoginPage'
 
 type CompanyProfile = {
   companyName: string
@@ -98,6 +101,23 @@ const initialProfile: CompanyProfile = {
   stripeAccountId: 'acct_1NMock8pQ2s9',
   stripePublishableKey: 'pk_live_51NMockxxxxxxxxxxxxxxxx',
   stripeWebhookSecret: 'whsec_mock_xxxxxxxxxxxxxxxx',
+}
+
+const PROFILE_STORAGE_KEY = 'cinvoice_company_profile_v1'
+
+function readStoredCompanyProfile(): CompanyProfile {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return initialProfile
+  }
+  try {
+    const raw = localStorage.getItem(PROFILE_STORAGE_KEY)
+    if (!raw?.trim()) return initialProfile
+    const parsed = JSON.parse(raw) as Partial<CompanyProfile>
+    if (!parsed || typeof parsed !== 'object') return initialProfile
+    return { ...initialProfile, ...parsed }
+  } catch {
+    return initialProfile
+  }
 }
 
 const initialCatalog: CatalogItem[] = [
@@ -299,20 +319,22 @@ const initialInvoices: InvoiceRecord[] = [
   },
 ]
 
-const createInitialInvoiceMeta = (): InvoiceMeta => ({
-  invoiceNumber: getNextInvoiceNumber(
-    initialProfile.invoiceNumberPrefix,
-    initialProfile.invoiceNumberYear,
-    initialInvoices,
-  ),
-  issueDate: new Date().toISOString().slice(0, 10),
-  dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-  status: 'Draft',
-  paymentTerms: 'Payment due within 14 days by bank transfer or card.',
-  notes: 'Thanks for your business. Late fee: 1.5% monthly after due date.',
-  discount: 0,
-  shipping: 0,
-})
+function createInvoiceMetaFromProfile(profile: CompanyProfile): InvoiceMeta {
+  return {
+    invoiceNumber: getNextInvoiceNumber(
+      profile.invoiceNumberPrefix,
+      profile.invoiceNumberYear,
+      initialInvoices,
+    ),
+    issueDate: new Date().toISOString().slice(0, 10),
+    dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    status: 'Draft',
+    paymentTerms: 'Payment due within 14 days by bank transfer or card.',
+    notes: 'Thanks for your business. Late fee: 1.5% monthly after due date.',
+    discount: 0,
+    shipping: 0,
+  }
+}
 
 const initialClients: ClientRecord[] = [
   {
@@ -356,15 +378,149 @@ const initialClients: ClientRecord[] = [
   },
 ]
 
+const WORKSPACE_STORAGE_KEY = 'cinvoice_workspace_v1'
+
+type StoredWorkspaceV1 = {
+  profile?: Partial<CompanyProfile>
+  catalog?: CatalogItem[]
+  draftLines?: DraftInvoiceLine[]
+  clientName?: string
+  clientGstHstNumber?: string
+  meta?: Partial<InvoiceMeta>
+  invoices?: InvoiceRecord[]
+  clients?: ClientRecord[]
+}
+
+type LoadedWorkspaceState = {
+  profile: CompanyProfile
+  catalog: CatalogItem[]
+  draftLines: DraftInvoiceLine[]
+  clientName: string
+  clientGstHstNumber: string
+  meta: InvoiceMeta
+  invoices: InvoiceRecord[]
+  clients: ClientRecord[]
+}
+
+function freshWorkspaceFromLegacyProfile(): LoadedWorkspaceState {
+  const profile = readStoredCompanyProfile()
+  return {
+    profile,
+    catalog: [...initialCatalog],
+    draftLines: [],
+    clientName: 'Sample Client Inc.',
+    clientGstHstNumber: '',
+    meta: createInvoiceMetaFromProfile(profile),
+    invoices: [...initialInvoices],
+    clients: [...initialClients],
+  }
+}
+
+function normalizeWorkspace(parsed: StoredWorkspaceV1): LoadedWorkspaceState {
+  const profile: CompanyProfile = { ...initialProfile, ...(parsed.profile ?? {}) }
+  const catalog: CatalogItem[] = Array.isArray(parsed.catalog) ? parsed.catalog : [...initialCatalog]
+  const invoices: InvoiceRecord[] = Array.isArray(parsed.invoices)
+    ? parsed.invoices
+    : [...initialInvoices]
+  const clients: ClientRecord[] = Array.isArray(parsed.clients) ? parsed.clients : [...initialClients]
+  const draftLines: DraftInvoiceLine[] = Array.isArray(parsed.draftLines)
+    ? parsed.draftLines
+    : []
+
+  const clientName =
+    typeof parsed.clientName === 'string' ? parsed.clientName : 'Sample Client Inc.'
+  const clientGstHstNumber =
+    typeof parsed.clientGstHstNumber === 'string' ? parsed.clientGstHstNumber : ''
+
+  const seededMeta = createInvoiceMetaFromProfile(profile)
+  const metaPartial = parsed.meta && typeof parsed.meta === 'object' ? parsed.meta : {}
+  const meta: InvoiceMeta = { ...seededMeta, ...metaPartial }
+
+  return {
+    profile,
+    catalog,
+    draftLines,
+    clientName,
+    clientGstHstNumber,
+    meta,
+    invoices,
+    clients,
+  }
+}
+
+function readWorkspaceInitialState(): LoadedWorkspaceState {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return freshWorkspaceFromLegacyProfile()
+  }
+  try {
+    const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY)
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as StoredWorkspaceV1
+      if (parsed && typeof parsed === 'object') {
+        return normalizeWorkspace(parsed)
+      }
+    }
+  } catch {
+    /* invalid JSON */
+  }
+  return freshWorkspaceFromLegacyProfile()
+}
+
 function App() {
-  const [profile, setProfile] = useState(initialProfile)
-  const [catalog, setCatalog] = useState(initialCatalog)
-  const [draftLines, setDraftLines] = useState<DraftInvoiceLine[]>([])
-  const [clientName, setClientName] = useState('Sample Client Inc.')
-  const [clientGstHstNumber, setClientGstHstNumber] = useState('')
-  const [meta, setMeta] = useState(() => createInitialInvoiceMeta())
-  const [invoices, setInvoices] = useState(initialInvoices)
-  const [clients, setClients] = useState(initialClients)
+  const [workspaceSeed] = useState(() => readWorkspaceInitialState())
+  const [profile, setProfile] = useState(workspaceSeed.profile)
+  const [catalog, setCatalog] = useState(workspaceSeed.catalog)
+  const [draftLines, setDraftLines] = useState(workspaceSeed.draftLines)
+  const [clientName, setClientName] = useState(workspaceSeed.clientName)
+  const [clientGstHstNumber, setClientGstHstNumber] = useState(workspaceSeed.clientGstHstNumber)
+  const [meta, setMeta] = useState(workspaceSeed.meta)
+  const [invoices, setInvoices] = useState(workspaceSeed.invoices)
+  const [clients, setClients] = useState(workspaceSeed.clients)
+
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [authChecked, setAuthChecked] = useState(false)
+  const [authed, setAuthed] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (!isAuthEnforced()) {
+        if (!cancelled) {
+          setAuthed(true)
+          setAuthChecked(true)
+        }
+        return
+      }
+      const ok = await checkSignedIn()
+      if (!cancelled) {
+        setAuthed(ok)
+        setAuthChecked(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      const snapshot: StoredWorkspaceV1 = {
+        profile,
+        catalog,
+        draftLines,
+        clientName,
+        clientGstHstNumber,
+        meta,
+        invoices,
+        clients,
+      }
+      localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
+      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
+    } catch {
+      /* quota or private mode */
+    }
+  }, [profile, catalog, draftLines, clientName, clientGstHstNumber, meta, invoices, clients])
 
   const totals = useMemo(() => {
     const subTotalRaw = draftLines.reduce((acc, line) => acc + line.quantity * line.customPrice, 0)
@@ -653,11 +809,14 @@ function App() {
 
     const taxRowCount = Math.max(1, taxBreakdown.length)
     const boxH = 8 + 5.5 * (2 + taxRowCount + 1) + 11
-    const termsLines = doc.splitTextToSize(meta.paymentTerms, leftColW)
+    const paymentTermsText = meta.paymentTerms.trim()
+    const showPaymentTerms = paymentTermsText.length > 0
+    const termsLines = showPaymentTerms ? doc.splitTextToSize(meta.paymentTerms, leftColW) : []
     const notesLines = doc.splitTextToSize(meta.notes, leftColW)
     const innerPad = 5.5
-    const leftBlockH =
-      innerPad + 5 + termsLines.length * 4.2 + 5 + notesLines.length * 4.2 + 3
+    const notesBlockH = 5 + notesLines.length * 4.2
+    const paymentBlockH = showPaymentTerms ? 5 + termsLines.length * 4.2 : 0
+    const leftBlockH = innerPad + notesBlockH + paymentBlockH + 3
     const footerSectionH = Math.max(boxH, leftBlockH) + 6
 
     if (y + 6 + footerSectionH > PAGE_SAFE) {
@@ -671,17 +830,19 @@ function App() {
     doc.setFontSize(9)
     doc.setTextColor(30, 41, 59)
     doc.setFont('helvetica', 'bold')
-    doc.text('Payment terms', mL, leftTitleY)
+    doc.text('Notes', mL, leftTitleY)
     doc.setFont('helvetica', 'normal')
     doc.setTextColor(71, 85, 105)
-    doc.text(termsLines, mL, leftTitleY + 5)
-    const notesHeaderY = leftTitleY + 5 + termsLines.length * 4.2
-    doc.setFont('helvetica', 'bold')
-    doc.setTextColor(30, 41, 59)
-    doc.text('Notes', mL, notesHeaderY)
-    doc.setFont('helvetica', 'normal')
-    doc.setTextColor(71, 85, 105)
-    doc.text(notesLines, mL, notesHeaderY + 5)
+    doc.text(notesLines, mL, leftTitleY + 5)
+    if (showPaymentTerms) {
+      const termsHeaderY = leftTitleY + notesBlockH
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(30, 41, 59)
+      doc.text('Payment terms', mL, termsHeaderY)
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(71, 85, 105)
+      doc.text(termsLines, mL, termsHeaderY + 5)
+    }
 
     doc.setDrawColor(...PDF_BRAND.totalsCardStroke)
     doc.setFillColor(...PDF_BRAND.totalsCardFill)
@@ -720,7 +881,6 @@ function App() {
     const footerY = PH - 8
     const totalPages = doc.getNumberOfPages()
     const tagLineBefore = 'Generated with '
-    const tagLineAfter = ' — frontend mock preview'
     for (let p = 1; p <= totalPages; p++) {
       doc.setPage(p)
       doc.setFont('helvetica', 'normal')
@@ -733,13 +893,30 @@ function App() {
       doc.setFont('helvetica', 'bold')
       doc.setTextColor(100, 116, 130)
       doc.text(APP_BRAND, fx, footerY)
-      fx += doc.getTextWidth(APP_BRAND)
-      doc.setFont('helvetica', 'normal')
-      doc.setTextColor(148, 163, 184)
-      doc.text(tagLineAfter, fx, footerY)
     }
 
+    const pdfBlob = doc.output('blob')
     doc.save(`${meta.invoiceNumber}.pdf`)
+    const invoiceKey = meta.invoiceNumber.replace(/[^\w.-]+/g, '_').slice(0, 120)
+    void uploadInvoicePdfToS3IfConfigured(pdfBlob, invoiceKey || `inv-${Date.now()}`).catch((err) => {
+      console.warn('Invoice PDF cloud upload skipped or failed:', err)
+    })
+  }
+
+  if (!authChecked) {
+    return <div className="auth-loading">Loading…</div>
+  }
+
+  if (isAuthEnforced()) {
+    if (!authed) {
+      if (location.pathname !== '/login') {
+        return <Navigate to="/login" replace />
+      }
+      return <LoginPage onSignedIn={() => setAuthed(true)} />
+    }
+    if (location.pathname === '/login') {
+      return <Navigate to="/" replace />
+    }
   }
 
   return (
@@ -764,6 +941,23 @@ function App() {
           <NavLink to="/clients">Clients</NavLink>
           <NavLink to="/company">Settings</NavLink>
         </nav>
+        {isAuthEnforced() && (
+          <div className="sidebar-signout">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                void (async () => {
+                  await signOutUser()
+                  setAuthed(false)
+                  navigate('/login', { replace: true })
+                })()
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        )}
       </aside>
 
       <main className="content">
@@ -989,6 +1183,9 @@ function CompanyPage({
     newPassword: '',
     confirmPassword: '',
   })
+  const [stripeSecretDraft, setStripeSecretDraft] = useState('')
+  const [cloudSyncBusy, setCloudSyncBusy] = useState(false)
+  const [cloudSyncMsg, setCloudSyncMsg] = useState<string | null>(null)
 
   return (
     <section>
@@ -997,7 +1194,9 @@ function CompanyPage({
           <h2>Settings</h2>
           <p className="muted">Manage company profile, payout setup, Stripe connection, and security preferences.</p>
         </div>
-        <button>Save Draft</button>
+        <p className="muted" style={{ margin: 0, textAlign: 'right', maxWidth: '22rem', lineHeight: 1.4 }}>
+          Invoices, catalog, clients, and draft edits save automatically in this browser (trial / local demo).
+        </p>
       </div>
 
       <div className="card">
@@ -1235,6 +1434,58 @@ function CompanyPage({
                       placeholder="whsec_..."
                     />
                   </label>
+                  {isApiConfigured() && (
+                    <div className="invoice-field-span" style={{ marginTop: 12 }}>
+                      <p className="muted" style={{ fontSize: 13, marginBottom: 8, lineHeight: 1.45 }}>
+                        API base URL is set (<code>VITE_API_BASE_URL</code>). Webhook and publishable keys stay in this
+                        browser; use the button below to copy Stripe <strong>secrets</strong> into DynamoDB via the
+                        backend. Secret key is not saved to local storage—only sent on this action.
+                      </p>
+                      <label>
+                        Stripe secret key (optional, server only)
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={stripeSecretDraft}
+                          onChange={(e) => setStripeSecretDraft(e.target.value)}
+                          placeholder="sk_live_... or sk_test_..."
+                        />
+                      </label>
+                      <div className="row" style={{ marginTop: 10 }}>
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={
+                            cloudSyncBusy ||
+                            (!stripeSecretDraft.trim() && !profile.stripeWebhookSecret?.trim())
+                          }
+                          onClick={async () => {
+                            setCloudSyncBusy(true)
+                            setCloudSyncMsg(null)
+                            try {
+                              await putStripeSettingsToAws({
+                                stripeSecretKey: stripeSecretDraft || undefined,
+                                stripeWebhookSecret: profile.stripeWebhookSecret,
+                              })
+                              setCloudSyncMsg('Stripe settings saved on the server.')
+                              setStripeSecretDraft('')
+                            } catch (e) {
+                              setCloudSyncMsg(e instanceof Error ? e.message : 'Sync failed')
+                            } finally {
+                              setCloudSyncBusy(false)
+                            }
+                          }}
+                        >
+                          {cloudSyncBusy ? 'Saving…' : 'Save Stripe settings to server'}
+                        </button>
+                      </div>
+                      {cloudSyncMsg && (
+                        <p className="muted" style={{ marginTop: 8 }}>
+                          {cloudSyncMsg}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               </fieldset>
             </div>
@@ -1966,16 +2217,7 @@ function CreateInvoicePage({
           </div>
 
           <div className="card">
-            <h3>Terms & Notes</h3>
-            <label>
-              Payment Terms
-              <textarea
-                rows={3}
-                value={meta.paymentTerms}
-                onChange={(e) => updateMeta('paymentTerms', e.target.value)}
-                placeholder="Payment instructions, due conditions, late fee terms..."
-              />
-            </label>
+            <h3>Notes & Terms</h3>
             <label>
               Notes
               <textarea
@@ -1983,6 +2225,15 @@ function CreateInvoicePage({
                 value={meta.notes}
                 onChange={(e) => updateMeta('notes', e.target.value)}
                 placeholder="Optional notes for client-facing invoice footer..."
+              />
+            </label>
+            <label>
+              Payment Terms
+              <textarea
+                rows={3}
+                value={meta.paymentTerms}
+                onChange={(e) => updateMeta('paymentTerms', e.target.value)}
+                placeholder="Payment instructions, due conditions, late fee terms..."
               />
             </label>
           </div>

@@ -1,0 +1,68 @@
+# Build the Vite app and sync to the static site S3 bucket; optionally invalidate CloudFront.
+#
+# GitHub → Settings → Secrets and variables → Actions, add:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#   S3_SITE_BUCKET          (e.g. cinvoice.celsin.ca — same as Terraform output site_bucket_name)
+#   VITE_COGNITO_USER_POOL_ID
+#   VITE_COGNITO_USER_POOL_CLIENT_ID
+# Optional:
+#   VITE_AWS_REGION           (default ca-central-1 in Vite env if unset)
+#   VITE_API_BASE_URL         (API Gateway invoke URL / prod stage)
+#   CLOUDFRONT_DISTRIBUTION_ID (Terraform output cloudfront_distribution_id — skip invalidation if empty)
+
+name: Deploy site to S3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'index.html'
+      - 'vite.config.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install and build
+        run: npm ci && npm run build
+        env:
+          VITE_COGNITO_USER_POOL_ID: ${{ secrets.VITE_COGNITO_USER_POOL_ID }}
+          VITE_COGNITO_USER_POOL_CLIENT_ID: ${{ secrets.VITE_COGNITO_USER_POOL_CLIENT_ID }}
+          VITE_AWS_REGION: ${{ secrets.VITE_AWS_REGION }}
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ca-central-1
+
+      - name: Sync to S3
+        run: aws s3 sync ./dist "s3://${{ secrets.S3_SITE_BUCKET }}/" --delete
+
+      - name: Invalidate CloudFront (optional)
+        env:
+          CF_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: |
+          if [ -n "$CF_ID" ]; then
+            aws cloudfront create-invalidation --distribution-id "$CF_ID" --paths "/*"
+          else
+            echo "CLOUDFRONT_DISTRIBUTION_ID not set; skipping invalidation."
+          fi

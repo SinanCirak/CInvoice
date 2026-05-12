@@ -186,18 +186,26 @@ def _put_workspace(event: Dict[str, Any]) -> Dict[str, Any]:
     return _response(200, {"ok": True, "storage": "dynamodb", "updatedAt": now, "hasLogo": bool(has_logo and logo_bytes)})
 
 
-def _put_setting(key: str, value: str) -> None:
+def _settings_pk_for_sub(sub: str) -> str:
+    return f"USER#{sub}"
+
+
+def _put_setting(sub: str, key: str, value: str) -> None:
     table = dynamodb.Table(TABLE_NAME)
     table.update_item(
-        Key={"pk": SETTINGS_PK, "sk": SETTINGS_SK},
+        Key={"pk": _settings_pk_for_sub(sub), "sk": SETTINGS_SK},
         UpdateExpression="SET #k = :v, updatedAt = :u",
         ExpressionAttributeNames={"#k": key},
         ExpressionAttributeValues={":v": value, ":u": datetime.now(timezone.utc).isoformat()},
     )
 
 
-def _get_settings() -> Dict[str, Any]:
+def _get_settings(sub: str) -> Dict[str, Any]:
     table = dynamodb.Table(TABLE_NAME)
+    item = table.get_item(Key={"pk": _settings_pk_for_sub(sub), "sk": SETTINGS_SK}).get("Item")
+    if item:
+        return item
+    # Backward compatibility for older deployments that used a global tenant row.
     item = table.get_item(Key={"pk": SETTINGS_PK, "sk": SETTINGS_SK}).get("Item", {})
     return item
 
@@ -231,7 +239,10 @@ def _route(event: Dict[str, Any]) -> Dict[str, Any]:
         return _put_workspace(event)
 
     if method == "GET" and path.endswith("/settings/stripe"):
-        settings = _get_settings()
+        sub = _jwt_sub(event)
+        if not sub:
+            return _response(401, {"message": "Unauthorized"})
+        settings = _get_settings(sub)
         return _response(
             200,
             {
@@ -241,11 +252,14 @@ def _route(event: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     if method == "PUT" and path.endswith("/settings/stripe"):
+        sub = _jwt_sub(event)
+        if not sub:
+            return _response(401, {"message": "Unauthorized"})
         payload = _read_json(event)
         if "stripeSecretKey" in payload and payload["stripeSecretKey"]:
-            _put_setting("stripeSecretKey", payload["stripeSecretKey"])
+            _put_setting(sub, "stripeSecretKey", payload["stripeSecretKey"])
         if "stripeWebhookSecret" in payload and payload["stripeWebhookSecret"]:
-            _put_setting("stripeWebhookSecret", payload["stripeWebhookSecret"])
+            _put_setting(sub, "stripeWebhookSecret", payload["stripeWebhookSecret"])
         return _response(200, {"updated": True})
 
     if method == "POST" and path.endswith("/invoices/presign"):

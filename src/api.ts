@@ -15,8 +15,11 @@ export function isApiConfigured(): boolean {
 
 async function jsonHeaders(): Promise<HeadersInit> {
   const token = await getIdToken()
+  if (!token) {
+    throw new Error('Not signed in or session expired; sign in again.')
+  }
   const h: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) h.Authorization = `Bearer ${token}`
+  h.Authorization = `Bearer ${token}`
   return h
 }
 
@@ -54,6 +57,9 @@ export async function putWorkspaceToAws(workspace: WorkspaceSnapshot): Promise<v
       throw new Error(
         'Workspace is too large for DynamoDB (even without inline logo). Remove old data or split exports.',
       )
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('Session expired or unauthorized. Please sign in again.')
     }
     const text = await res.text().catch(() => '')
     throw new Error(text || `Workspace save failed: ${res.status}`)

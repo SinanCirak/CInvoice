@@ -267,6 +267,55 @@ function normalizeCanadianPostalCode(value: string): string {
   return `${cleaned.slice(0, 3)} ${cleaned.slice(3)}`
 }
 
+function isAuthSessionErrorMessage(message: string): boolean {
+  return /(session expired|not signed in|unauthorized|sign in again|401|403)/i.test(message)
+}
+
+async function readFileAsDataUrl(file: File): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('Could not read image file.'))
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('Could not decode image.'))
+    img.src = src
+  })
+}
+
+async function convertImageToPngDataUrl(src: string, maxDimensionPx = 640): Promise<string> {
+  const img = await loadImageElement(src)
+  const scale = Math.min(1, maxDimensionPx / Math.max(img.width || 1, img.height || 1))
+  const targetW = Math.max(1, Math.round((img.width || 1) * scale))
+  const targetH = Math.max(1, Math.round((img.height || 1) * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = targetW
+  canvas.height = targetH
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Canvas is unavailable in this browser.')
+  ctx.drawImage(img, 0, 0, targetW, targetH)
+  return canvas.toDataURL('image/png')
+}
+
+async function prepareLogoForPdf(logoSource: string): Promise<{ src: string; format: 'PNG' | 'JPEG' }> {
+  if (logoSource.startsWith('data:image/jpeg')) {
+    return { src: logoSource, format: 'JPEG' }
+  }
+  if (logoSource.startsWith('data:image/png')) {
+    return { src: logoSource, format: 'PNG' }
+  }
+  if (logoSource.startsWith('data:')) {
+    return { src: await convertImageToPngDataUrl(logoSource), format: 'PNG' }
+  }
+  return { src: logoSource, format: /\.jpe?g$/i.test(logoSource) ? 'JPEG' : 'PNG' }
+}
+
 function taxLabelForRate(rate: number): string {
   if (rate === 0) return 'Tax-exempt (0%)'
   if (rate === 5) return 'GST (5%)'
@@ -478,6 +527,7 @@ function App() {
     () => !isApiConfigured() || !isCognitoConfigured(),
   )
   const [authUserDisplay, setAuthUserDisplay] = useState<string | null>(null)
+  const [workspaceAutoSaveError, setWorkspaceAutoSaveError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!authed || !isApiConfigured() || !isCognitoConfigured()) {
@@ -503,8 +553,16 @@ function App() {
           setClients(n.clients)
           setLastPdf(n.lastPdf)
         }
+        setWorkspaceAutoSaveError(null)
       } catch (e) {
+        const message = e instanceof Error ? e.message : 'Workspace cloud load failed'
         console.warn('Workspace cloud load failed', e)
+        if (!cancelled) {
+          setWorkspaceAutoSaveError(message)
+          if (isAuthSessionErrorMessage(message)) {
+            setAuthed(false)
+          }
+        }
       } finally {
         if (!cancelled) setWorkspaceCloudReady(true)
       }
@@ -551,9 +609,19 @@ function App() {
         clients,
         lastPdf,
       }
-      void putWorkspaceToAws(snapshot as unknown as Record<string, unknown>).catch((err) => {
-        console.warn('Workspace cloud save failed', err)
-      })
+      void (async () => {
+        try {
+          await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
+          setWorkspaceAutoSaveError(null)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Workspace cloud save failed'
+          console.warn('Workspace cloud save failed', err)
+          setWorkspaceAutoSaveError(message)
+          if (isAuthSessionErrorMessage(message)) {
+            setAuthed(false)
+          }
+        }
+      })()
     }, 2000)
     return () => window.clearTimeout(t)
   }, [
@@ -588,13 +656,24 @@ function App() {
       const cloudOk =
         isCognitoConfigured() && isApiConfigured() && authed && workspaceCloudReady
       if (cloudOk) {
-        await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
+        try {
+          await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
+          setWorkspaceAutoSaveError(null)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Workspace save failed'
+          setWorkspaceAutoSaveError(message)
+          if (isAuthSessionErrorMessage(message)) {
+            setAuthed(false)
+          }
+          throw err
+        }
         return
       }
       if (!isCognitoConfigured()) {
         try {
           localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
           localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
+          setWorkspaceAutoSaveError(null)
         } catch {
           throw new Error('Could not save to browser storage.')
         }
@@ -614,6 +693,7 @@ function App() {
     [
       authed,
       workspaceCloudReady,
+      setAuthed,
       profile,
       catalog,
       draftLines,
@@ -630,11 +710,12 @@ function App() {
     !isCognitoConfigured() || (Boolean(authed) && workspaceCloudReady && isApiConfigured())
 
   const workspaceSaveHint =
-    isCognitoConfigured() && !isApiConfigured()
+    workspaceAutoSaveError ??
+    (isCognitoConfigured() && !isApiConfigured()
       ? MISSING_API_GATEWAY_URL
       : isCognitoConfigured() && authed && !workspaceCloudReady
         ? 'Loading workspace…'
-        : undefined
+        : undefined)
 
   const totals = useMemo(() => {
     const subTotalRaw = draftLines.reduce((acc, line) => acc + line.quantity * line.customPrice, 0)
@@ -707,11 +788,17 @@ function App() {
     doc.roundedRect(logoX, logoY, logoBox, logoBox, 2.4, 2.4, 'FD')
 
     const logoSource = profile.logoDataUrl || brandLogoPath
+    let logoForPdf: { src: string; format: 'PNG' | 'JPEG' } = { src: logoSource, format: 'PNG' }
+    try {
+      logoForPdf = await prepareLogoForPdf(logoSource)
+    } catch {
+      logoForPdf = { src: logoSource, format: 'PNG' }
+    }
     const innerMax = logoBox - logoPad * 2
     let imgDrawW = innerMax * 0.92
     let imgDrawH = innerMax * 0.92
     try {
-      const props = doc.getImageProperties(logoSource)
+      const props = doc.getImageProperties(logoForPdf.src)
       const iw = props.width || innerMax
       const ih = props.height || innerMax
       const s = Math.min(innerMax / iw, innerMax / ih)
@@ -723,7 +810,7 @@ function App() {
     const logoIx = logoX + (logoBox - imgDrawW) / 2
     const logoIy = logoY + (logoBox - imgDrawH) / 2
     try {
-      doc.addImage(logoSource, 'PNG', logoIx, logoIy, imgDrawW, imgDrawH)
+      doc.addImage(logoForPdf.src, logoForPdf.format, logoIx, logoIy, imgDrawW, imgDrawH)
     } catch {
       doc.setTextColor(...PDF_BRAND.headerMuted)
       doc.setFont('helvetica', 'bold')
@@ -1482,17 +1569,32 @@ function CompanyPage({
   saveEnabled: boolean
   saveHint?: string
 }) {
+  const MAX_LOGO_UPLOAD_BYTES = 2_000_000
   const setValue = (key: keyof CompanyProfile, value: string) => {
     onChange({ ...profile, [key]: value })
   }
   const onLogoUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      onChange({ ...profile, logoDataUrl: String(reader.result) })
+    if (file.size > MAX_LOGO_UPLOAD_BYTES) {
+      setLogoUploadMsg('Logo is too large. Please upload an image up to 2 MB.')
+      event.target.value = ''
+      return
     }
-    reader.readAsDataURL(file)
+    setLogoUploadMsg(null)
+    void (async () => {
+      try {
+        const rawDataUrl = await readFileAsDataUrl(file)
+        const normalizedDataUrl = await convertImageToPngDataUrl(rawDataUrl, 640)
+        onChange({ ...profile, logoDataUrl: normalizedDataUrl })
+        setLogoUploadMsg('Logo prepared and ready to save.')
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Logo upload failed.'
+        setLogoUploadMsg(message)
+      } finally {
+        event.target.value = ''
+      }
+    })()
   }
   const [activeTab, setActiveTab] = useState<'general' | 'payment' | 'security'>('general')
   const [passwordForm, setPasswordForm] = useState({
@@ -1505,6 +1607,7 @@ function CompanyPage({
   const [cloudSyncMsg, setCloudSyncMsg] = useState<string | null>(null)
   const [workspaceSaveBusy, setWorkspaceSaveBusy] = useState(false)
   const [workspaceSaveMsg, setWorkspaceSaveMsg] = useState<string | null>(null)
+  const [logoUploadMsg, setLogoUploadMsg] = useState<string | null>(null)
 
   const handleSaveWorkspace = () => {
     setWorkspaceSaveMsg(null)
@@ -1537,7 +1640,7 @@ function CompanyPage({
           >
             {workspaceSaveBusy ? 'Saving…' : 'Save'}
           </button>
-          {(workspaceSaveMsg || (saveHint && !saveEnabled)) && (
+          {(workspaceSaveMsg || saveHint) && (
             <p className="muted company-save-feedback" role="status">
               {workspaceSaveMsg ?? saveHint}
             </p>
@@ -1691,10 +1794,15 @@ function CompanyPage({
 
               <fieldset className="group-box">
                 <legend>Company logo</legend>
-                <p className="muted">Upload PNG/JPG logo for invoice preview and PDF export.</p>
+                <p className="muted">Upload PNG/JPG/WEBP logo; it is resized and saved as PNG for stable PDF output.</p>
                 <div className="row" style={{ marginTop: '0.6rem' }}>
                   <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onLogoUpload} />
                 </div>
+                {logoUploadMsg && (
+                  <p className="muted" style={{ marginTop: 8 }}>
+                    {logoUploadMsg}
+                  </p>
+                )}
                 <div className="prefix-logo-preview">
                   <img src={profile.logoDataUrl || brandLogoPath} alt="Company logo preview" />
                 </div>

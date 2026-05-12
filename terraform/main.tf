@@ -476,15 +476,19 @@ resource "aws_apigatewayv2_route" "post_stripe_webhook" {
 }
 
 resource "aws_apigatewayv2_route" "get_settings_stripe" {
-  api_id    = aws_apigatewayv2_api.http.id
-  route_key = "GET /settings/stripe"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "GET /settings/stripe"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
 }
 
 resource "aws_apigatewayv2_route" "put_settings_stripe" {
-  api_id    = aws_apigatewayv2_api.http.id
-  route_key = "PUT /settings/stripe"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "PUT /settings/stripe"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
 }
 
 # JWT-protected routes (Cognito ID token as Bearer)

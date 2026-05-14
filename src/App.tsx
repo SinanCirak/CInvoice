@@ -496,12 +496,17 @@ function App() {
   const [authUserDisplay, setAuthUserDisplay] = useState<string | null>(null)
   const [workspaceAutoSaveError, setWorkspaceAutoSaveError] = useState<string | null>(null)
 
+  /** After password sign-in, ignore a late/stale bootstrap `checkSignedIn() === false` (StrictMode / slow network). */
+  const userSessionPinnedRef = useRef(false)
+
   useEffect(() => {
     let cancelled = false
     void (async () => {
       const ok = await checkSignedIn()
       if (!cancelled) {
-        setAuthed(ok)
+        if (!(userSessionPinnedRef.current && !ok)) {
+          setAuthed(ok)
+        }
         setAuthChecked(true)
       }
     })()
@@ -513,7 +518,10 @@ function App() {
   useEffect(() => {
     if (!isCognitoConfigured()) return
     const stop = Hub.listen('auth', ({ payload }) => {
-      if (payload.event === 'signedOut') setAuthed(false)
+      if (payload.event === 'signedOut') {
+        userSessionPinnedRef.current = false
+        setAuthed(false)
+      }
     })
     return stop
   }, [])
@@ -1166,7 +1174,7 @@ function App() {
     if (location.pathname !== '/login') {
       return <Navigate to="/login" replace />
     }
-    return <LoginPage onSignedIn={() => setAuthed(true)} />
+    return <LoginPage onSignedIn={() => { userSessionPinnedRef.current = true; setAuthed(true) }} />
   }
   if (location.pathname === '/login') {
     return <Navigate to="/" replace />
@@ -1190,6 +1198,7 @@ function App() {
               onClick={() => {
                 void (async () => {
                   await signOutUser()
+                  userSessionPinnedRef.current = false
                   setAuthed(false)
                   setAuthUserDisplay(null)
                   navigate('/login', { replace: true })

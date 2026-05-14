@@ -19,7 +19,13 @@ import {
   putWorkspaceToAws,
   uploadInvoicePdfToS3IfConfigured,
 } from './api'
-import { checkSignedIn, getAuthUserDisplay, isCognitoConfigured, signOutUser } from './auth/cognito'
+import {
+  checkSignedIn,
+  confirmCognitoSessionStillValid,
+  getAuthUserDisplay,
+  isCognitoConfigured,
+  signOutUser,
+} from './auth/cognito'
 import LoginPage from './LoginPage'
 
 type CompanyProfile = {
@@ -529,6 +535,11 @@ function App() {
   const [authUserDisplay, setAuthUserDisplay] = useState<string | null>(null)
   const [workspaceAutoSaveError, setWorkspaceAutoSaveError] = useState<string | null>(null)
 
+  const clearAuthedIfSessionDead = useCallback(async () => {
+    const still = await confirmCognitoSessionStillValid()
+    if (!still) setAuthed(false)
+  }, [])
+
   useEffect(() => {
     if (!authed || !isApiConfigured() || !isCognitoConfigured()) {
       setWorkspaceCloudReady(true)
@@ -560,7 +571,7 @@ function App() {
         if (!cancelled) {
           setWorkspaceAutoSaveError(message)
           if (isAuthSessionErrorMessage(message)) {
-            setAuthed(false)
+            await clearAuthedIfSessionDead()
           }
         }
       } finally {
@@ -570,7 +581,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [authed])
+  }, [authed, clearAuthedIfSessionDead])
 
   useEffect(() => {
     if (isCognitoConfigured()) {
@@ -618,7 +629,7 @@ function App() {
           console.warn('Workspace cloud save failed', err)
           setWorkspaceAutoSaveError(message)
           if (isAuthSessionErrorMessage(message)) {
-            setAuthed(false)
+            await clearAuthedIfSessionDead()
           }
         }
       })()
@@ -627,6 +638,7 @@ function App() {
   }, [
     workspaceCloudReady,
     authed,
+    clearAuthedIfSessionDead,
     profile,
     catalog,
     draftLines,
@@ -663,7 +675,7 @@ function App() {
           const message = err instanceof Error ? err.message : 'Workspace save failed'
           setWorkspaceAutoSaveError(message)
           if (isAuthSessionErrorMessage(message)) {
-            setAuthed(false)
+            await clearAuthedIfSessionDead()
           }
           throw err
         }
@@ -693,7 +705,7 @@ function App() {
     [
       authed,
       workspaceCloudReady,
-      setAuthed,
+      clearAuthedIfSessionDead,
       profile,
       catalog,
       draftLines,

@@ -138,3 +138,19 @@ export async function getIdToken(): Promise<string | null> {
     return null
   }
 }
+
+/**
+ * After a possible auth failure from our API, re-check Cognito with a token refresh before clearing UI session.
+ * Avoids logging the user out on transient errors or non-auth HTTP statuses that matched a loose error filter.
+ */
+export async function confirmCognitoSessionStillValid(): Promise<boolean> {
+  if (!isCognitoConfigured()) return false
+  ensureConfigured()
+  try {
+    await getCurrentUser()
+    const session = await fetchAuthSession({ forceRefresh: true })
+    return Boolean(tokenToString(session.tokens?.idToken))
+  } catch {
+    return false
+  }
+}

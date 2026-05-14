@@ -10,6 +10,10 @@
 #   VITE_AWS_REGION           (default ca-central-1 in Vite env if unset)
 #   VITE_API_BASE_URL         (HTTP API invoke URL from Terraform — baked into the JS bundle at build time)
 #   CLOUDFRONT_DISTRIBUTION_ID (Terraform output cloudfront_distribution_id — skip invalidation if empty)
+# Auth session (optional — omit to use app defaults: cookies ~30 days, see src/auth/cognito.ts)
+#   VITE_AUTH_COOKIE_DAYS      (e.g. 90)
+#   VITE_AUTH_COOKIE_DOMAIN    (e.g. .celsin.ca for subdomains; HTTPS)
+#   VITE_AUTH_TOKEN_STORAGE    (local | localstorage to force localStorage instead of cookies)
 
 name: Deploy site to S3
 
@@ -46,6 +50,9 @@ jobs:
           VITE_COGNITO_USER_POOL_CLIENT_ID: ${{ secrets.VITE_COGNITO_USER_POOL_CLIENT_ID }}
           VITE_AWS_REGION: ${{ secrets.VITE_AWS_REGION }}
           VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_AUTH_COOKIE_DAYS: ${{ secrets.VITE_AUTH_COOKIE_DAYS }}
+          VITE_AUTH_COOKIE_DOMAIN: ${{ secrets.VITE_AUTH_COOKIE_DOMAIN }}
+          VITE_AUTH_TOKEN_STORAGE: ${{ secrets.VITE_AUTH_TOKEN_STORAGE }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

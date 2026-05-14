@@ -1,26 +1,64 @@
 import { Amplify } from 'aws-amplify'
+import { cognitoCredentialsProvider, cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito'
+import { CookieStorage, defaultStorage } from 'aws-amplify/utils'
 import { fetchAuthSession, getCurrentUser, signIn, signOut } from 'aws-amplify/auth'
 
 let configured = false
 
+function readAuthCookieDays(): number {
+  const raw = import.meta.env.VITE_AUTH_COOKIE_DAYS
+  const n = raw != null && String(raw).trim() !== '' ? Number(raw) : NaN
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 3650) : 30
+}
+
+function useLocalStorageForTokens(): boolean {
+  const mode = import.meta.env.VITE_AUTH_TOKEN_STORAGE?.trim().toLowerCase()
+  return mode === 'local' || mode === 'localstorage'
+}
+
 /**
- * Single-arg configure so Amplify wires Cognito token storage + credentials the supported way
- * (passing only tokenProvider in libraryOptions skips that path and breaks sessions for some builds).
+ * Configure Amplify once: Cognito + token store (cookies by default, like a long-lived browser session).
+ * Cookies use `secure` only on HTTPS so `npm run dev` on http://localhost still works.
  */
 function ensureConfigured() {
   if (configured) return
   const poolId = import.meta.env.VITE_COGNITO_USER_POOL_ID?.trim()
   const clientId = import.meta.env.VITE_COGNITO_USER_POOL_CLIENT_ID?.trim()
+  const region = import.meta.env.VITE_AWS_REGION?.trim() || 'ca-central-1'
   if (!poolId || !clientId) return
 
-  Amplify.configure({
-    Auth: {
-      Cognito: {
-        userPoolId: poolId,
-        userPoolClientId: clientId,
+  const authResources = {
+    Cognito: {
+      userPoolId: poolId,
+      userPoolClientId: clientId,
+      region,
+    },
+  }
+
+  const keyValueStorage = useLocalStorageForTokens()
+    ? defaultStorage
+    : new CookieStorage({
+        path: '/',
+        expires: readAuthCookieDays(),
+        sameSite: 'lax',
+        secure: typeof window !== 'undefined' ? window.location.protocol === 'https:' : true,
+        ...(import.meta.env.VITE_AUTH_COOKIE_DOMAIN?.trim()
+          ? { domain: import.meta.env.VITE_AUTH_COOKIE_DOMAIN.trim() }
+          : {}),
+      })
+
+  cognitoUserPoolsTokenProvider.setKeyValueStorage(keyValueStorage)
+  cognitoUserPoolsTokenProvider.setAuthConfig(authResources)
+
+  Amplify.configure(
+    { Auth: authResources },
+    {
+      Auth: {
+        tokenProvider: cognitoUserPoolsTokenProvider,
+        credentialsProvider: cognitoCredentialsProvider,
       },
     },
-  })
+  )
   configured = true
 }
 

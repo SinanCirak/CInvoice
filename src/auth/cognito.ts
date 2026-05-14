@@ -11,13 +11,15 @@ function readAuthCookieDays(): number {
   return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 3650) : 30
 }
 
-function useLocalStorageForTokens(): boolean {
+/** Amplify default (localStorage) unless explicitly opting into cookies (large JWTs can break cookie limits). */
+function useCookieStorageForTokens(): boolean {
   const mode = import.meta.env.VITE_AUTH_TOKEN_STORAGE?.trim().toLowerCase()
-  return mode === 'local' || mode === 'localstorage'
+  return mode === 'cookie' || mode === 'cookies'
 }
 
 /**
- * Configure Amplify once: Cognito + token store (cookies by default, like a long-lived browser session).
+ * Configure Amplify once: Cognito + token store (localStorage by default).
+ * Set VITE_AUTH_TOKEN_STORAGE=cookie for cookie-backed tokens (optional).
  * Cookies use `secure` only on HTTPS so `npm run dev` on http://localhost still works.
  */
 function ensureConfigured() {
@@ -35,9 +37,8 @@ function ensureConfigured() {
     },
   }
 
-  const keyValueStorage = useLocalStorageForTokens()
-    ? defaultStorage
-    : new CookieStorage({
+  const keyValueStorage = useCookieStorageForTokens()
+    ? new CookieStorage({
         path: '/',
         expires: readAuthCookieDays(),
         sameSite: 'lax',
@@ -46,6 +47,7 @@ function ensureConfigured() {
           ? { domain: import.meta.env.VITE_AUTH_COOKIE_DOMAIN.trim() }
           : {}),
       })
+    : defaultStorage
 
   cognitoUserPoolsTokenProvider.setKeyValueStorage(keyValueStorage)
   cognitoUserPoolsTokenProvider.setAuthConfig(authResources)
@@ -136,21 +138,5 @@ export async function getIdToken(): Promise<string | null> {
     return id
   } catch {
     return null
-  }
-}
-
-/**
- * After a possible auth failure from our API, re-check Cognito with a token refresh before clearing UI session.
- * Avoids logging the user out on transient errors or non-auth HTTP statuses that matched a loose error filter.
- */
-export async function confirmCognitoSessionStillValid(): Promise<boolean> {
-  if (!isCognitoConfigured()) return false
-  ensureConfigured()
-  try {
-    await getCurrentUser()
-    const session = await fetchAuthSession({ forceRefresh: true })
-    return Boolean(tokenToString(session.tokens?.idToken))
-  } catch {
-    return false
   }
 }

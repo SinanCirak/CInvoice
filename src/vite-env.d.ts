@@ -10,8 +10,8 @@ interface ImportMetaEnv {
   /** Optional: session cookie lifetime in days (default 30). */
   readonly VITE_AUTH_COOKIE_DAYS?: string
   /**
-   * `local` / `localstorage`: store tokens in localStorage (Amplify default).
-   * Omit or `cookie`: store tokens in cookies so sessions survive browser restarts until expiry or sign-out.
+   * `cookie` / `cookies`: store Cognito tokens in cookies (optional; large JWTs can exceed cookie limits).
+   * Omit or any other value: localStorage (Amplify default, recommended).
    */
   readonly VITE_AUTH_TOKEN_STORAGE?: string
 }

@@ -19,13 +19,8 @@ import {
   putWorkspaceToAws,
   uploadInvoicePdfToS3IfConfigured,
 } from './api'
-import {
-  checkSignedIn,
-  confirmCognitoSessionStillValid,
-  getAuthUserDisplay,
-  isCognitoConfigured,
-  signOutUser,
-} from './auth/cognito'
+import { checkSignedIn, getAuthUserDisplay, isCognitoConfigured, signOutUser } from './auth/cognito'
+import { Hub } from 'aws-amplify/utils'
 import LoginPage from './LoginPage'
 
 type CompanyProfile = {
@@ -273,10 +268,6 @@ function normalizeCanadianPostalCode(value: string): string {
   return `${cleaned.slice(0, 3)} ${cleaned.slice(3)}`
 }
 
-function isAuthSessionErrorMessage(message: string): boolean {
-  return /(session expired|not signed in|unauthorized|sign in again|401|403)/i.test(message)
-}
-
 async function readFileAsDataUrl(file: File): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -499,6 +490,11 @@ function App() {
   const navigate = useNavigate()
   const [authChecked, setAuthChecked] = useState(false)
   const [authed, setAuthed] = useState(false)
+  const [workspaceCloudReady, setWorkspaceCloudReady] = useState(
+    () => !isApiConfigured() || !isCognitoConfigured(),
+  )
+  const [authUserDisplay, setAuthUserDisplay] = useState<string | null>(null)
+  const [workspaceAutoSaveError, setWorkspaceAutoSaveError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -515,6 +511,14 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!isCognitoConfigured()) return
+    const stop = Hub.listen('auth', ({ payload }) => {
+      if (payload.event === 'signedOut') setAuthed(false)
+    })
+    return stop
+  }, [])
+
+  useEffect(() => {
     if (!authed || !isCognitoConfigured()) {
       setAuthUserDisplay(null)
       return
@@ -528,17 +532,6 @@ function App() {
       cancelled = true
     }
   }, [authed])
-
-  const [workspaceCloudReady, setWorkspaceCloudReady] = useState(
-    () => !isApiConfigured() || !isCognitoConfigured(),
-  )
-  const [authUserDisplay, setAuthUserDisplay] = useState<string | null>(null)
-  const [workspaceAutoSaveError, setWorkspaceAutoSaveError] = useState<string | null>(null)
-
-  const clearAuthedIfSessionDead = useCallback(async () => {
-    const still = await confirmCognitoSessionStillValid()
-    if (!still) setAuthed(false)
-  }, [])
 
   useEffect(() => {
     if (!authed || !isApiConfigured() || !isCognitoConfigured()) {
@@ -570,9 +563,6 @@ function App() {
         console.warn('Workspace cloud load failed', e)
         if (!cancelled) {
           setWorkspaceAutoSaveError(message)
-          if (isAuthSessionErrorMessage(message)) {
-            await clearAuthedIfSessionDead()
-          }
         }
       } finally {
         if (!cancelled) setWorkspaceCloudReady(true)
@@ -581,7 +571,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [authed, clearAuthedIfSessionDead])
+  }, [authed])
 
   useEffect(() => {
     if (isCognitoConfigured()) {
@@ -628,9 +618,6 @@ function App() {
           const message = err instanceof Error ? err.message : 'Workspace cloud save failed'
           console.warn('Workspace cloud save failed', err)
           setWorkspaceAutoSaveError(message)
-          if (isAuthSessionErrorMessage(message)) {
-            await clearAuthedIfSessionDead()
-          }
         }
       })()
     }, 2000)
@@ -638,7 +625,6 @@ function App() {
   }, [
     workspaceCloudReady,
     authed,
-    clearAuthedIfSessionDead,
     profile,
     catalog,
     draftLines,
@@ -674,9 +660,6 @@ function App() {
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Workspace save failed'
           setWorkspaceAutoSaveError(message)
-          if (isAuthSessionErrorMessage(message)) {
-            await clearAuthedIfSessionDead()
-          }
           throw err
         }
         return
@@ -705,7 +688,6 @@ function App() {
     [
       authed,
       workspaceCloudReady,
-      clearAuthedIfSessionDead,
       profile,
       catalog,
       draftLines,

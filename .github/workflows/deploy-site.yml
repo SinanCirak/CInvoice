@@ -13,7 +13,7 @@
 # Auth session (optional — omit to use app defaults: cookies ~30 days, see src/auth/cognito.ts)
 #   VITE_AUTH_COOKIE_DAYS      (e.g. 90)
 #   VITE_AUTH_COOKIE_DOMAIN    (e.g. .celsin.ca for subdomains; HTTPS)
-#   VITE_AUTH_TOKEN_STORAGE    (local | localstorage to force localStorage instead of cookies)
+#   VITE_AUTH_TOKEN_STORAGE    (cookie | cookies — otherwise localStorage; cookies can fail with large JWTs)
 
 name: Deploy site to S3
 

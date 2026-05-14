@@ -85,6 +85,11 @@ export async function checkSignedIn(): Promise<boolean> {
 export async function signInWithEmail(email: string, password: string): Promise<void> {
   ensureConfigured()
   await signIn({ username: email.trim(), password })
+  const session = await fetchAuthSession({ forceRefresh: true })
+  const id = tokenToString(session.tokens?.idToken)
+  if (!id) {
+    throw new Error('Sign-in completed but no ID token is available yet. Please try again.')
+  }
 }
 
 export async function signOutUser(): Promise<void> {
@@ -124,19 +129,22 @@ function tokenToString(token: unknown): string | null {
   return null
 }
 
-/** ID token for API Gateway JWT authorizer. */
+/** ID token for API Gateway JWT authorizer (retries: session can lag right after sign-in or tab wake). */
 export async function getIdToken(): Promise<string | null> {
   if (!isCognitoConfigured()) return null
   ensureConfigured()
-  try {
-    let session = await fetchAuthSession()
-    let id = tokenToString(session.tokens?.idToken)
-    if (!id) {
-      session = await fetchAuthSession({ forceRefresh: true })
-      id = tokenToString(session.tokens?.idToken)
+  const backoffMs = [0, 80, 200, 450]
+  for (let i = 0; i < backoffMs.length; i++) {
+    if (backoffMs[i] > 0) {
+      await new Promise((r) => setTimeout(r, backoffMs[i]))
     }
-    return id
-  } catch {
-    return null
+    try {
+      const session = await fetchAuthSession({ forceRefresh: i > 0 })
+      const id = tokenToString(session.tokens?.idToken)
+      if (id) return id
+    } catch {
+      /* try next attempt */
+    }
   }
+  return null
 }

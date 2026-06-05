@@ -25,20 +25,92 @@ async function jsonHeaders(): Promise<HeadersInit> {
 
 export type WorkspaceSnapshot = Record<string, unknown>
 
-export async function fetchWorkspaceFromAws(): Promise<WorkspaceSnapshot | null> {
+export async function fetchWorkspaceFromAws(): Promise<WorkspaceSnapshot> {
   const b = apiBase()
-  if (!b) return null
+  if (!b) {
+    throw new Error(MISSING_API_GATEWAY_URL)
+  }
   const token = await getIdToken()
-  if (!token) return null
+  if (!token) {
+    throw new Error('Not signed in or session expired; sign in again.')
+  }
   const res = await fetch(`${b}/workspace`, { headers: { Authorization: `Bearer ${token}` } })
   if (!res.ok) {
-    throw new Error(`Workspace load failed: ${res.status}`)
+    const text = await res.text().catch(() => '')
+    let detail = text
+    try {
+      const parsed = JSON.parse(text) as { message?: string; error?: string }
+      detail = parsed.message || parsed.error || text
+    } catch {
+      /* keep raw text */
+    }
+    throw new Error(detail ? `Workspace load failed (${res.status}): ${detail}` : `Workspace load failed: ${res.status}`)
   }
   const data = (await res.json()) as { workspace?: WorkspaceSnapshot | null }
-  return data.workspace ?? null
+  if (!data.workspace || typeof data.workspace !== 'object') {
+    throw new Error('Workspace load returned empty response from server.')
+  }
+  return data.workspace
 }
 
-export async function putWorkspaceToAws(workspace: WorkspaceSnapshot): Promise<void> {
+export async function deleteClientFromAws(clientId: string, clientIdConfirm: string): Promise<void> {
+  const b = apiBase()
+  if (!b) {
+    throw new Error(MISSING_API_GATEWAY_URL)
+  }
+  const token = await getIdToken()
+  if (!token) {
+    throw new Error('Not signed in or session expired; sign in again.')
+  }
+  const res = await fetch(`${b}/clients/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ clientId, clientIdConfirm: clientIdConfirm.trim() }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let detail = text
+    try {
+      const parsed = JSON.parse(text) as { message?: string }
+      detail = parsed.message || text
+    } catch {
+      /* keep raw text */
+    }
+    throw new Error(detail || `Client delete failed: ${res.status}`)
+  }
+}
+
+export async function deleteInvoiceFromAws(invoiceId: string, invoiceNumber: string): Promise<void> {
+  const b = apiBase()
+  if (!b) {
+    throw new Error(MISSING_API_GATEWAY_URL)
+  }
+  const token = await getIdToken()
+  if (!token) {
+    throw new Error('Not signed in or session expired; sign in again.')
+  }
+  const res = await fetch(`${b}/invoices/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ invoiceId, invoiceNumber: invoiceNumber.trim() }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let detail = text
+    try {
+      const parsed = JSON.parse(text) as { message?: string }
+      detail = parsed.message || text
+    } catch {
+      /* keep raw text */
+    }
+    throw new Error(detail || `Invoice delete failed: ${res.status}`)
+  }
+}
+
+export async function putWorkspaceToAws(
+  workspace: WorkspaceSnapshot,
+  options?: { fullSync?: boolean },
+): Promise<void> {
   const b = apiBase()
   if (!b) {
     throw new Error(MISSING_API_GATEWAY_URL)
@@ -47,10 +119,10 @@ export async function putWorkspaceToAws(workspace: WorkspaceSnapshot): Promise<v
   if (!token) {
     throw new Error('Not signed in or session expired; sign in again to save.')
   }
-  const res = await fetch(`${b}/workspace`, {
+  const res = await fetch(`${b}/sync`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ workspace }),
+    body: JSON.stringify({ workspace, fullSync: Boolean(options?.fullSync) }),
   })
   if (!res.ok) {
     if (res.status === 413) {

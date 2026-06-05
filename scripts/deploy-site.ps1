@@ -2,9 +2,6 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-Write-Host "Building frontend..." -ForegroundColor Cyan
-npm run build
-
 $tfDir = Join-Path $root "terraform"
 if (-not (Test-Path $tfDir)) {
   throw "terraform/ directory not found."
@@ -24,6 +21,19 @@ try {
 } finally {
   Pop-Location
 }
+
+$apiUrl = [string]$out.api_base_url.value
+$poolId = [string]$out.cognito_user_pool_id.value
+$clientId = [string]$out.cognito_app_client_id.value
+if (-not $apiUrl -or -not $poolId -or -not $clientId) {
+  throw "Terraform outputs missing api_base_url / cognito ids. Run terraform apply first."
+}
+
+Write-Host "Building frontend (API + Cognito from Terraform)..." -ForegroundColor Cyan
+$env:VITE_API_BASE_URL = $apiUrl
+$env:VITE_COGNITO_USER_POOL_ID = $poolId
+$env:VITE_COGNITO_USER_POOL_CLIENT_ID = $clientId
+npm run build
 
 $bucket = $out.site_bucket_name.value
 if (-not $bucket) {

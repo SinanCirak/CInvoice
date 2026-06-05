@@ -1,7 +1,7 @@
 import { Amplify } from 'aws-amplify'
 import { cognitoCredentialsProvider, cognitoUserPoolsTokenProvider } from 'aws-amplify/auth/cognito'
 import { CookieStorage, defaultStorage } from 'aws-amplify/utils'
-import { fetchAuthSession, getCurrentUser, signIn, signOut } from 'aws-amplify/auth'
+import { fetchAuthSession, getCurrentUser, signIn, signOut, updatePassword } from 'aws-amplify/auth'
 
 let configured = false
 
@@ -90,6 +90,11 @@ export async function signInWithEmail(email: string, password: string): Promise<
   if (!id) {
     throw new Error('Sign-in completed but no ID token is available yet. Please try again.')
   }
+}
+
+export async function changeUserPassword(currentPassword: string, newPassword: string): Promise<void> {
+  ensureConfigured()
+  await updatePassword({ oldPassword: currentPassword, newPassword })
 }
 
 export async function signOutUser(): Promise<void> {

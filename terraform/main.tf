@@ -76,7 +76,7 @@ locals {
   app_domain      = "${var.app_subdomain}.${var.root_domain}"
   invoice_bucket  = "data.${local.app_domain}"
   api_name        = "cinvoice-api"
-  dynamodb_table  = "cinvoice-app"
+  dynamodb_table  = "cinvoice-main"
   lambda_name     = "cinvoice-backend"
   lambda_zip_path = "${path.module}/backend.zip"
   settings_pk     = "TENANT#default"
@@ -143,6 +143,22 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "invoices" {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
     }
+  }
+}
+
+# Browser uploads PDF via presigned PUT from cinvoice.celsin.ca — bucket CORS required.
+resource "aws_s3_bucket_cors_configuration" "invoices" {
+  bucket = aws_s3_bucket.invoices.id
+
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["GET", "PUT", "HEAD"]
+    allowed_origins = [
+      "https://${local.app_domain}",
+      "http://localhost:5173",
+    ]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3600
   }
 }
 
@@ -339,6 +355,40 @@ resource "aws_dynamodb_table" "app" {
     type = "S"
   }
 
+  attribute {
+    name = "GSI1PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI1SK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI2PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI2SK"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "GSI1"
+    hash_key        = "GSI1PK"
+    range_key       = "GSI1SK"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "GSI2"
+    hash_key        = "GSI2PK"
+    range_key       = "GSI2SK"
+    projection_type = "ALL"
+  }
+
   tags = var.tags
 }
 
@@ -377,9 +427,15 @@ resource "aws_iam_role_policy" "lambda" {
         Action = [
           "dynamodb:GetItem",
           "dynamodb:PutItem",
-          "dynamodb:UpdateItem"
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:BatchWriteItem"
         ]
-        Resource = aws_dynamodb_table.app.arn
+        Resource = [
+          aws_dynamodb_table.app.arn,
+          "${aws_dynamodb_table.app.arn}/index/*"
+        ]
       },
       {
         Effect = "Allow"
@@ -390,6 +446,24 @@ resource "aws_iam_role_policy" "lambda" {
           "s3:DeleteObject"
         ]
         Resource = "${aws_s3_bucket.invoices.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.invoices.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["invoices/*", "workspace/*"]
+          }
+        }
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "cognito-idp:InitiateAuth",
+          "cognito-idp:AdminSetUserPassword"
+        ]
+        Resource = aws_cognito_user_pool.main.arn
       }
     ]
   })
@@ -397,8 +471,9 @@ resource "aws_iam_role_policy" "lambda" {
 
 data "archive_file" "backend_zip" {
   type        = "zip"
-  source_file = "${path.module}/lambda/backend.py"
+  source_dir  = "${path.module}/lambda"
   output_path = local.lambda_zip_path
+  excludes    = ["__pycache__", "*.pyc"]
 }
 
 resource "aws_lambda_function" "backend" {
@@ -475,6 +550,44 @@ resource "aws_apigatewayv2_route" "post_stripe_webhook" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
+resource "aws_apigatewayv2_route" "post_admin_set_password" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "POST /admin/set-password"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_route" "get_bootstrap" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "GET /bootstrap"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "put_sync" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "PUT /sync"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "post_invoices_create" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "POST /invoices"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "get_invoices_open" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "GET /invoices/open"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
 resource "aws_apigatewayv2_route" "get_settings_stripe" {
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "GET /settings/stripe"
@@ -511,6 +624,22 @@ resource "aws_apigatewayv2_route" "put_workspace" {
 resource "aws_apigatewayv2_route" "post_invoices_presign" {
   api_id             = aws_apigatewayv2_api.http.id
   route_key          = "POST /invoices/presign"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "post_invoices_delete" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "POST /invoices/delete"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
+}
+
+resource "aws_apigatewayv2_route" "post_clients_delete" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "POST /clients/delete"
   target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
   authorization_type = "JWT"
   authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id

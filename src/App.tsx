@@ -12,6 +12,8 @@ import {
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
   MISSING_API_GATEWAY_URL,
+  deleteInvoiceFromAws,
+  deleteClientFromAws,
   fetchWorkspaceFromAws,
   getInvoicePdfDownloadUrl,
   isApiConfigured,
@@ -19,7 +21,7 @@ import {
   putWorkspaceToAws,
   uploadInvoicePdfToS3IfConfigured,
 } from './api'
-import { checkSignedIn, getAuthUserDisplay, isCognitoConfigured, signOutUser } from './auth/cognito'
+import { changeUserPassword, checkSignedIn, getAuthUserDisplay, isCognitoConfigured, signOutUser } from './auth/cognito'
 import { Hub } from 'aws-amplify/utils'
 import LoginPage from './LoginPage'
 
@@ -38,6 +40,7 @@ type CompanyProfile = {
   invoiceNumberYear: string
   paymentAccountName: string
   paymentInstitutionName: string
+  paymentInstitutionNumber: string
   paymentTransitNumber: string
   paymentAccountNumber: string
   paymentEmail: string
@@ -63,15 +66,25 @@ type DraftInvoiceLine = CatalogItem & {
 type InvoiceRecord = {
   id: string
   invoiceNumber: string
+  clientId?: string
   client: string
   issueDate: string
   dueDate: string
   totalAmount: number
   paidAmount: number
   status: 'Draft' | 'Open' | 'Partial' | 'Paid' | 'Overdue'
-  paymentChannel?: 'Interac' | 'Bank Transfer' | 'Credit Card' | 'Cash'
-  /** S3 object key for this invoice PDF (same pattern as CTrackr fileKey on Dynamo items). */
+  paymentChannel?: 'Interac e-Transfer' | 'E-Transfer' | 'Interac' | 'Bank Transfer' | 'Credit Card' | 'Cash'
   pdfObjectKey?: string
+  subtotal?: number
+  tax?: number
+  lines?: {
+    name: string
+    unit: string
+    quantity: number
+    price: number
+    taxRate: number
+    total?: number
+  }[]
 }
 
 type ClientRecord = {
@@ -117,6 +130,7 @@ const initialProfile: CompanyProfile = {
   invoiceNumberYear: new Date().getFullYear().toString(),
   paymentAccountName: '',
   paymentInstitutionName: '',
+  paymentInstitutionNumber: '',
   paymentTransitNumber: '',
   paymentAccountNumber: '',
   paymentEmail: '',
@@ -160,10 +174,24 @@ const CANADA_PROVINCES = [
   'YT',
 ] as const
 
-type UiIconName = 'search' | 'filter' | 'columns' | 'edit' | 'save' | 'view' | 'check' | 'trash'
+type UiIconName = 'search' | 'filter' | 'columns' | 'edit' | 'save' | 'view' | 'check' | 'trash' | 'menu' | 'close'
 
 function UiIcon({ name }: { name: UiIconName }) {
   const common = { fill: 'none', stroke: 'currentColor', strokeWidth: '1.8', strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const }
+  if (name === 'menu') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 7h16M4 12h16M4 17h16" {...common} />
+      </svg>
+    )
+  }
+  if (name === 'close') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18" {...common} />
+      </svg>
+    )
+  }
   if (name === 'search') {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -254,7 +282,24 @@ function escapeRegExp(value: string) {
 }
 
 function formatUsd(n: number): string {
-  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function isStrongPassword(password: string): boolean {
+  return (
+    password.length >= 8 &&
+    /[A-Z]/.test(password) &&
+    /[0-9]/.test(password) &&
+    /[^A-Za-z0-9]/.test(password)
+  )
+}
+
+function invoiceRemainingAmount(invoice: InvoiceRecord): number {
+  return Math.max(0, invoice.totalAmount - invoice.paidAmount)
+}
+
+function isInvoiceFullyPaid(invoice: InvoiceRecord): boolean {
+  return invoice.status === 'Paid' || invoiceRemainingAmount(invoice) < 0.005
 }
 
 function parseIssueDateMs(isoDay: string): number {
@@ -266,6 +311,71 @@ function normalizeCanadianPostalCode(value: string): string {
   const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
   if (cleaned.length <= 3) return cleaned
   return `${cleaned.slice(0, 3)} ${cleaned.slice(3)}`
+}
+
+type InvoicePaymentBlock = {
+  hasContent: boolean
+  eftLines: { label: string; value: string }[]
+  etransferEmail: string
+}
+
+function buildInvoicePaymentBlock(profile: CompanyProfile): InvoicePaymentBlock {
+  const eftLines: { label: string; value: string }[] = []
+  const accountName = profile.paymentAccountName.trim()
+  const bankName = profile.paymentInstitutionName.trim()
+  const institution = profile.paymentInstitutionNumber.trim()
+  const transit = profile.paymentTransitNumber.trim()
+  const account = profile.paymentAccountNumber.trim()
+  const etransferEmail = profile.paymentEmail.trim()
+
+  if (accountName) eftLines.push({ label: 'Account name', value: accountName })
+  if (bankName) eftLines.push({ label: 'Financial institution', value: bankName })
+  if (institution) eftLines.push({ label: 'Institution No.', value: institution.padStart(3, '0') })
+  if (transit) eftLines.push({ label: 'Transit No.', value: transit.padStart(5, '0') })
+  if (account) eftLines.push({ label: 'Account No.', value: account })
+
+  const hasEft = eftLines.length > 0
+  return {
+    hasContent: hasEft || etransferEmail.length > 0,
+    eftLines,
+    etransferEmail,
+  }
+}
+
+function buildPaymentFooterLines(block: InvoicePaymentBlock): string[] {
+  const lines: string[] = []
+  const get = (label: string) => block.eftLines.find((row) => row.label === label)?.value
+
+  if (block.eftLines.length) {
+    const parts: string[] = ['EFT']
+    const name = get('Account name')
+    const bank = get('Financial institution')
+    const inst = get('Institution No.')
+    const transit = get('Transit No.')
+    const acct = get('Account No.')
+    if (name) parts.push(name)
+    if (bank) parts.push(bank)
+    if (inst && transit && acct) parts.push(`${inst}-${transit}-${acct}`)
+    else {
+      if (inst) parts.push(`Inst ${inst}`)
+      if (transit) parts.push(`Transit ${transit}`)
+      if (acct) parts.push(`Acct ${acct}`)
+    }
+    lines.push(parts.join(' · '))
+  }
+  if (block.etransferEmail) {
+    lines.push(`Interac e-Transfer · ${block.etransferEmail}`)
+  }
+  return lines
+}
+
+function estimatePaymentFooterHeight(block: InvoicePaymentBlock, doc: import('jspdf').jsPDF, contentWidth: number): number {
+  if (!block.hasContent) return 0
+  let h = 6 + 4
+  for (const line of buildPaymentFooterLines(block)) {
+    h += Math.max(3.2, doc.splitTextToSize(line, contentWidth).length * 3.2)
+  }
+  return h + 6
 }
 
 async function readFileAsDataUrl(file: File): Promise<string> {
@@ -286,6 +396,22 @@ async function loadImageElement(src: string): Promise<HTMLImageElement> {
   })
 }
 
+async function convertImageToJpegDataUrl(src: string, maxDimensionPx = 256, quality = 0.85): Promise<string> {
+  const img = await loadImageElement(src)
+  const scale = Math.min(1, maxDimensionPx / Math.max(img.width || 1, img.height || 1))
+  const targetW = Math.max(1, Math.round((img.width || 1) * scale))
+  const targetH = Math.max(1, Math.round((img.height || 1) * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = targetW
+  canvas.height = targetH
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Canvas is unavailable in this browser.')
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, targetW, targetH)
+  ctx.drawImage(img, 0, 0, targetW, targetH)
+  return canvas.toDataURL('image/jpeg', quality)
+}
+
 async function convertImageToPngDataUrl(src: string, maxDimensionPx = 640): Promise<string> {
   const img = await loadImageElement(src)
   const scale = Math.min(1, maxDimensionPx / Math.max(img.width || 1, img.height || 1))
@@ -300,17 +426,20 @@ async function convertImageToPngDataUrl(src: string, maxDimensionPx = 640): Prom
   return canvas.toDataURL('image/png')
 }
 
+/** PDF logo is drawn ~28mm — embed a small JPEG, not the full S3/upload resolution. */
 async function prepareLogoForPdf(logoSource: string): Promise<{ src: string; format: 'PNG' | 'JPEG' }> {
-  if (logoSource.startsWith('data:image/jpeg')) {
-    return { src: logoSource, format: 'JPEG' }
+  const PDF_LOGO_MAX_PX = 256
+  try {
+    const src = await convertImageToJpegDataUrl(logoSource, PDF_LOGO_MAX_PX, 0.85)
+    return { src, format: 'JPEG' }
+  } catch {
+    try {
+      const src = await convertImageToPngDataUrl(logoSource, PDF_LOGO_MAX_PX)
+      return { src, format: 'PNG' }
+    } catch {
+      return { src: logoSource, format: /\.jpe?g$/i.test(logoSource) ? 'JPEG' : 'PNG' }
+    }
   }
-  if (logoSource.startsWith('data:image/png')) {
-    return { src: logoSource, format: 'PNG' }
-  }
-  if (logoSource.startsWith('data:')) {
-    return { src: await convertImageToPngDataUrl(logoSource), format: 'PNG' }
-  }
-  return { src: logoSource, format: /\.jpe?g$/i.test(logoSource) ? 'JPEG' : 'PNG' }
 }
 
 function taxLabelForRate(rate: number): string {
@@ -354,6 +483,111 @@ function getNextInvoiceNumber(prefix: string, year: string, invoices: InvoiceRec
   return `${p}-${y}-${String(max + 1).padStart(3, '0')}`
 }
 
+function parseClientSequence(id: string): number | null {
+  const m = /^cl-(\d+)$/i.exec(id.trim())
+  if (!m) return null
+  if (m[1].length > 4) return null
+  return parseInt(m[1], 10)
+}
+
+function getNextClientId(clients: ClientRecord[]): string {
+  let max = 0
+  for (const client of clients) {
+    const seq = parseClientSequence(client.id)
+    if (seq != null) max = Math.max(max, seq)
+  }
+  return `CL-${String(max + 1).padStart(3, '0')}`
+}
+
+function formatClientIdDisplay(id: string): string {
+  const seq = parseClientSequence(id)
+  if (seq != null) return `CL-${String(seq).padStart(3, '0')}`
+  return id.toUpperCase()
+}
+
+type DashboardChartPeriod = 'week' | 'month' | '6month' | 'year'
+
+type DashboardBucket = {
+  label: string
+  billed: number
+  paid: number
+  tax: number
+}
+
+function invoiceTaxAmount(inv: InvoiceRecord): number {
+  if (typeof inv.tax === 'number' && inv.tax >= 0) return inv.tax
+  if (inv.lines?.length) {
+    return inv.lines.reduce((acc, line) => {
+      const base = line.quantity * line.price
+      return acc + base * (line.taxRate / 100)
+    }, 0)
+  }
+  return 0
+}
+
+function buildDashboardBuckets(
+  invoices: InvoiceRecord[],
+  period: DashboardChartPeriod,
+  now: Date,
+): DashboardBucket[] {
+  const buckets: DashboardBucket[] = []
+
+  const sumForRange = (startMs: number, endMs: number) => {
+    let billed = 0
+    let paid = 0
+    let tax = 0
+    for (const inv of invoices) {
+      const t = parseIssueDateMs(inv.issueDate)
+      if (t >= startMs && t <= endMs) {
+        billed += inv.totalAmount
+        paid += inv.paidAmount
+        tax += invoiceTaxAmount(inv)
+      }
+    }
+    return { billed, paid, tax }
+  }
+
+  if (period === 'week') {
+    for (let back = 6; back >= 0; back--) {
+      const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back)
+      const startMs = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime()
+      const endMs = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 23, 59, 59, 999).getTime()
+      const totals = sumForRange(startMs, endMs)
+      buckets.push({
+        label: day.toLocaleString('en-CA', { weekday: 'short' }),
+        ...totals,
+      })
+    }
+    return buckets
+  }
+
+  if (period === 'month') {
+    for (let w = 3; w >= 0; w--) {
+      const weekEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - w * 7, 23, 59, 59, 999)
+      const weekStart = new Date(weekEnd.getFullYear(), weekEnd.getMonth(), weekEnd.getDate() - 6, 0, 0, 0)
+      const totals = sumForRange(weekStart.getTime(), weekEnd.getTime())
+      buckets.push({
+        label: `W${4 - w}`,
+        ...totals,
+      })
+    }
+    return buckets
+  }
+
+  const monthCount = period === '6month' ? 6 : 12
+  for (let back = monthCount - 1; back >= 0; back--) {
+    const anchor = new Date(now.getFullYear(), now.getMonth() - back, 1)
+    const startMs = anchor.getTime()
+    const endMs = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0, 23, 59, 59, 999).getTime()
+    const totals = sumForRange(startMs, endMs)
+    buckets.push({
+      label: anchor.toLocaleString('en-CA', { month: period === 'year' ? 'short' : 'short', year: period === 'year' ? '2-digit' : undefined }),
+      ...totals,
+    })
+  }
+  return buckets
+}
+
 function createInvoiceMetaFromProfile(profile: CompanyProfile, invoices: InvoiceRecord[]): InvoiceMeta {
   return {
     invoiceNumber: getNextInvoiceNumber(profile.invoiceNumberPrefix, profile.invoiceNumberYear, invoices),
@@ -381,6 +615,7 @@ type StoredWorkspaceV1 = {
   draftLines?: DraftInvoiceLine[]
   clientName?: string
   clientGstHstNumber?: string
+  clientId?: string
   meta?: Partial<InvoiceMeta>
   invoices?: InvoiceRecord[]
   clients?: ClientRecord[]
@@ -393,6 +628,7 @@ type LoadedWorkspaceState = {
   draftLines: DraftInvoiceLine[]
   clientName: string
   clientGstHstNumber: string
+  clientId: string
   meta: InvoiceMeta
   invoices: InvoiceRecord[]
   clients: ClientRecord[]
@@ -408,6 +644,7 @@ function freshWorkspaceFromLegacyProfile(): LoadedWorkspaceState {
     draftLines: [],
     clientName: '',
     clientGstHstNumber: '',
+    clientId: '',
     meta: createInvoiceMetaFromProfile(profile, emptyInv),
     invoices: [],
     clients: [],
@@ -444,6 +681,7 @@ function normalizeWorkspace(parsed: StoredWorkspaceV1): LoadedWorkspaceState {
     draftLines,
     clientName,
     clientGstHstNumber,
+    clientId: typeof parsed.clientId === 'string' ? parsed.clientId : '',
     meta,
     invoices,
     clients,
@@ -479,6 +717,7 @@ function App() {
   const [draftLines, setDraftLines] = useState(workspaceSeed.draftLines)
   const [clientName, setClientName] = useState(workspaceSeed.clientName)
   const [clientGstHstNumber, setClientGstHstNumber] = useState(workspaceSeed.clientGstHstNumber)
+  const [selectedClientId, setSelectedClientId] = useState(workspaceSeed.clientId)
   const [meta, setMeta] = useState(workspaceSeed.meta)
   const [invoices, setInvoices] = useState(workspaceSeed.invoices)
   const [clients, setClients] = useState(workspaceSeed.clients)
@@ -494,10 +733,33 @@ function App() {
     () => !isApiConfigured() || !isCognitoConfigured(),
   )
   const [authUserDisplay, setAuthUserDisplay] = useState<string | null>(null)
-  const [workspaceAutoSaveError, setWorkspaceAutoSaveError] = useState<string | null>(null)
+  const [workspaceSaveError, setWorkspaceSaveError] = useState<string | null>(null)
 
   /** After password sign-in, ignore a late/stale bootstrap `checkSignedIn() === false` (StrictMode / slow network). */
   const userSessionPinnedRef = useRef(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  useEffect(() => {
+    setMobileNavOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 769px)')
+    const onChange = () => {
+      if (mq.matches) setMobileNavOpen(false)
+    }
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
+  useEffect(() => {
+    if (!mobileNavOpen) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [mobileNavOpen])
 
   useEffect(() => {
     let cancelled = false
@@ -552,97 +814,35 @@ function App() {
       try {
         const remote = await fetchWorkspaceFromAws()
         if (cancelled) return
-        if (remote && typeof remote === 'object') {
-          const parsed = remote as StoredWorkspaceV1
-          const n = normalizeWorkspace(parsed)
-          setProfile(n.profile)
-          setCatalog(n.catalog)
-          setDraftLines(n.draftLines)
-          setClientName(n.clientName)
-          setClientGstHstNumber(n.clientGstHstNumber)
-          setMeta(n.meta)
-          setInvoices(n.invoices)
-          setClients(n.clients)
-          setLastPdf(n.lastPdf)
-        }
-        setWorkspaceAutoSaveError(null)
+        const parsed = remote as StoredWorkspaceV1
+        const n = normalizeWorkspace(parsed)
+        setProfile(n.profile)
+        setCatalog(n.catalog)
+        setDraftLines(n.draftLines)
+        setClientName(n.clientName)
+        setClientGstHstNumber(n.clientGstHstNumber)
+        setSelectedClientId(n.clientId)
+        setMeta(n.meta)
+        setInvoices(n.invoices)
+        setClients(n.clients)
+        setLastPdf(n.lastPdf)
+        setWorkspaceSaveError(null)
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Workspace cloud load failed'
         console.warn('Workspace cloud load failed', e)
         if (!cancelled) {
-          setWorkspaceAutoSaveError(message)
+          setWorkspaceSaveError(message)
         }
       } finally {
-        if (!cancelled) setWorkspaceCloudReady(true)
+        if (!cancelled) {
+          setWorkspaceCloudReady(true)
+        }
       }
     })()
     return () => {
       cancelled = true
     }
   }, [authed])
-
-  useEffect(() => {
-    if (isCognitoConfigured()) {
-      return
-    }
-    try {
-      const snapshot: StoredWorkspaceV1 = {
-        profile,
-        catalog,
-        draftLines,
-        clientName,
-        clientGstHstNumber,
-        meta,
-        invoices,
-        clients,
-        lastPdf,
-      }
-      localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
-      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
-    } catch {
-      /* quota or private mode */
-    }
-  }, [profile, catalog, draftLines, clientName, clientGstHstNumber, meta, invoices, clients, lastPdf])
-
-  useEffect(() => {
-    if (!workspaceCloudReady || !isApiConfigured() || !isCognitoConfigured() || !authed) return
-    const t = window.setTimeout(() => {
-      const snapshot: StoredWorkspaceV1 = {
-        profile,
-        catalog,
-        draftLines,
-        clientName,
-        clientGstHstNumber,
-        meta,
-        invoices,
-        clients,
-        lastPdf,
-      }
-      void (async () => {
-        try {
-          await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
-          setWorkspaceAutoSaveError(null)
-        } catch (err) {
-          const message = err instanceof Error ? err.message : 'Workspace cloud save failed'
-          console.warn('Workspace cloud save failed', err)
-          setWorkspaceAutoSaveError(message)
-        }
-      })()
-    }, 2000)
-    return () => window.clearTimeout(t)
-  }, [
-    workspaceCloudReady,
-    authed,
-    profile,
-    catalog,
-    draftLines,
-    clientName,
-    clientGstHstNumber,
-    meta,
-    invoices,
-    clients,
-    lastPdf,
-  ])
 
   const persistWorkspace = useCallback(
     async (snapshotOverride?: StoredWorkspaceV1) => {
@@ -654,6 +854,7 @@ function App() {
           draftLines,
           clientName,
           clientGstHstNumber,
+          clientId: selectedClientId,
           meta,
           invoices,
           clients,
@@ -663,11 +864,11 @@ function App() {
         isCognitoConfigured() && isApiConfigured() && authed && workspaceCloudReady
       if (cloudOk) {
         try {
-          await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>)
-          setWorkspaceAutoSaveError(null)
+          await putWorkspaceToAws(snapshot as unknown as Record<string, unknown>, { fullSync: true })
+          setWorkspaceSaveError(null)
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Workspace save failed'
-          setWorkspaceAutoSaveError(message)
+          setWorkspaceSaveError(message)
           throw err
         }
         return
@@ -676,7 +877,7 @@ function App() {
         try {
           localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
           localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
-          setWorkspaceAutoSaveError(null)
+          setWorkspaceSaveError(null)
         } catch {
           throw new Error('Could not save to browser storage.')
         }
@@ -701,6 +902,8 @@ function App() {
       draftLines,
       clientName,
       clientGstHstNumber,
+      selectedClientId,
+      selectedClientId,
       meta,
       invoices,
       clients,
@@ -708,11 +911,132 @@ function App() {
     ],
   )
 
+  const updateInvoices = useCallback(
+    async (nextInvoices: InvoiceRecord[]) => {
+      setInvoices(nextInvoices)
+      await persistWorkspace({
+        profile,
+        catalog,
+        draftLines,
+        clientName,
+        clientGstHstNumber,
+        clientId: selectedClientId,
+        meta,
+        invoices: nextInvoices,
+        clients,
+        lastPdf,
+      })
+    },
+    [
+      persistWorkspace,
+      profile,
+      catalog,
+      draftLines,
+      clientName,
+      clientGstHstNumber,
+      selectedClientId,
+      meta,
+      clients,
+      lastPdf,
+    ],
+  )
+
+  const updateCatalog = useCallback(
+    async (nextCatalog: CatalogItem[]) => {
+      setCatalog(nextCatalog)
+      await persistWorkspace({
+        profile,
+        catalog: nextCatalog,
+        draftLines,
+        clientName,
+        clientGstHstNumber,
+        clientId: selectedClientId,
+        meta,
+        invoices,
+        clients,
+        lastPdf,
+      })
+    },
+    [
+      persistWorkspace,
+      profile,
+      draftLines,
+      clientName,
+      clientGstHstNumber,
+      selectedClientId,
+      meta,
+      invoices,
+      clients,
+      lastPdf,
+    ],
+  )
+
+  const updateClients = useCallback(
+    async (nextClients: ClientRecord[]) => {
+      setClients(nextClients)
+      await persistWorkspace({
+        profile,
+        catalog,
+        draftLines,
+        clientName,
+        clientGstHstNumber,
+        clientId: selectedClientId,
+        meta,
+        invoices,
+        clients: nextClients,
+        lastPdf,
+      })
+    },
+    [
+      persistWorkspace,
+      profile,
+      catalog,
+      draftLines,
+      clientName,
+      clientGstHstNumber,
+      selectedClientId,
+      meta,
+      invoices,
+      lastPdf,
+    ],
+  )
+
+  const handleDeleteInvoice = useCallback(
+    async (invoiceId: string, invoiceNumber: string) => {
+      if (isCognitoConfigured() && isApiConfigured()) {
+        if (!authed || !workspaceCloudReady) {
+          throw new Error('Sign in and wait for workspace to load before deleting an invoice.')
+        }
+        await deleteInvoiceFromAws(invoiceId, invoiceNumber)
+      }
+      setInvoices((prev) => prev.filter((inv) => inv.id !== invoiceId))
+    },
+    [authed, workspaceCloudReady],
+  )
+
+  const handleDeleteClient = useCallback(
+    async (clientId: string, clientIdConfirm: string) => {
+      if (isCognitoConfigured() && isApiConfigured()) {
+        if (!authed || !workspaceCloudReady) {
+          throw new Error('Sign in and wait for workspace to load before deleting a client.')
+        }
+        await deleteClientFromAws(clientId, clientIdConfirm)
+      }
+      setClients((prev) => prev.filter((client) => client.id !== clientId))
+      if (selectedClientId === clientId) {
+        setSelectedClientId('')
+        setClientName('')
+        setClientGstHstNumber('')
+      }
+    },
+    [authed, workspaceCloudReady, selectedClientId],
+  )
+
   const workspaceSaveEnabled =
     !isCognitoConfigured() || (Boolean(authed) && workspaceCloudReady && isApiConfigured())
 
   const workspaceSaveHint =
-    workspaceAutoSaveError ??
+    workspaceSaveError ??
     (isCognitoConfigured() && !isApiConfigured()
       ? MISSING_API_GATEWAY_URL
       : isCognitoConfigured() && authed && !workspaceCloudReady
@@ -1012,17 +1336,24 @@ function App() {
 
     const taxRowCount = Math.max(1, taxBreakdown.length)
     const boxH = 8 + 5.5 * (2 + taxRowCount + 1) + 11
+    const paymentBlock = buildInvoicePaymentBlock(profile)
+    const invoicePaymentFooterH = estimatePaymentFooterHeight(paymentBlock, doc, W - 6)
     const paymentTermsText = meta.paymentTerms.trim()
     const showPaymentTerms = paymentTermsText.length > 0
+    const notesText = meta.notes.trim()
+    const showNotes = notesText.length > 0
     const termsLines = showPaymentTerms ? doc.splitTextToSize(meta.paymentTerms, leftColW) : []
-    const notesLines = doc.splitTextToSize(meta.notes, leftColW)
+    const notesLines = showNotes ? doc.splitTextToSize(notesText, leftColW) : []
     const innerPad = 5.5
-    const notesBlockH = 5 + notesLines.length * 4.2
-    const paymentBlockH = showPaymentTerms ? 5 + termsLines.length * 4.2 : 0
-    const leftBlockH = innerPad + notesBlockH + paymentBlockH + 3
+    const notesBlockH = showNotes ? 5 + notesLines.length * 4.2 : 0
+    const paymentTermsBlockH = showPaymentTerms ? 5 + termsLines.length * 4.2 : 0
+    const leftBlockH =
+      showNotes || showPaymentTerms ? innerPad + notesBlockH + paymentTermsBlockH + 3 : 0
+    const pageBottomReserve = 16 + (paymentBlock.hasContent ? invoicePaymentFooterH + 2 : 0)
+    const pageSafeWithPayment = PH - pageBottomReserve
     const footerSectionH = Math.max(boxH, leftBlockH) + 6
 
-    if (y + 6 + footerSectionH > PAGE_SAFE) {
+    if (y + 6 + footerSectionH > pageSafeWithPayment) {
       doc.addPage()
       y = 14
     }
@@ -1032,13 +1363,15 @@ function App() {
     doc.setFont('helvetica', 'normal')
     doc.setFontSize(9)
     doc.setTextColor(30, 41, 59)
-    doc.setFont('helvetica', 'bold')
-    doc.text('Notes', mL, leftTitleY)
-    doc.setFont('helvetica', 'normal')
-    doc.setTextColor(71, 85, 105)
-    doc.text(notesLines, mL, leftTitleY + 5)
+    if (showNotes) {
+      doc.setFont('helvetica', 'bold')
+      doc.text('Notes', mL, leftTitleY)
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(71, 85, 105)
+      doc.text(notesLines, mL, leftTitleY + 5)
+    }
     if (showPaymentTerms) {
-      const termsHeaderY = leftTitleY + notesBlockH
+      const termsHeaderY = showNotes ? leftTitleY + notesBlockH : leftTitleY
       doc.setFont('helvetica', 'bold')
       doc.setTextColor(30, 41, 59)
       doc.text('Payment terms', mL, termsHeaderY)
@@ -1083,8 +1416,39 @@ function App() {
 
     const footerY = PH - 8
     const totalPages = doc.getNumberOfPages()
+    const paymentBoxTop = PH - 14 - invoicePaymentFooterH
+    const paymentFooterLines = buildPaymentFooterLines(paymentBlock)
+    const paymentInnerW = W - 6
+
     for (let p = 1; p <= totalPages; p++) {
       doc.setPage(p)
+      if (p === totalPages && paymentBlock.hasContent) {
+        doc.setDrawColor(...PDF_BRAND.metaStroke)
+        doc.setFillColor(...PDF_BRAND.metaFill)
+        doc.roundedRect(mL, paymentBoxTop, W, invoicePaymentFooterH, 2, 2, 'FD')
+
+        let py = paymentBoxTop + 5
+        doc.setFont('helvetica', 'bold')
+        doc.setFontSize(7.5)
+        doc.setTextColor(30, 41, 59)
+        doc.text('PAYMENT INFORMATION', mL + 3, py)
+        doc.setFont('helvetica', 'normal')
+        doc.setFontSize(6.5)
+        doc.setTextColor(100, 116, 130)
+        doc.text(`Ref: ${meta.invoiceNumber}`, mL + W - 3, py, { align: 'right' })
+        py += 4
+
+        doc.setFont('helvetica', 'normal')
+        doc.setFontSize(7)
+        doc.setTextColor(55, 65, 85)
+        for (const line of paymentFooterLines) {
+          for (const wrapped of doc.splitTextToSize(line, paymentInnerW)) {
+            doc.text(wrapped, mL + 3, py)
+            py += 3.2
+          }
+        }
+      }
+
       doc.setFont('helvetica', 'normal')
       doc.setFontSize(8)
       doc.setTextColor(148, 163, 184)
@@ -1101,7 +1465,9 @@ function App() {
     try {
       objectKey = await uploadInvoicePdfToS3IfConfigured(pdfBlob, invoiceKey || `inv-${Date.now()}`)
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'PDF cloud upload failed'
       console.warn('Invoice PDF S3 upload failed (invoice will still be saved to the workspace):', err)
+      setWorkspaceSaveError(`PDF not saved to cloud: ${msg}. Check browser console (often S3 CORS).`)
     }
 
     const nextLastPdf: LastPdfMeta | undefined = objectKey
@@ -1115,15 +1481,27 @@ function App() {
     const statusForRow: InvoiceRecord['status'] =
       meta.status === 'Draft' ? 'Open' : (meta.status as InvoiceRecord['status'])
 
+    const invoiceLines = draftLines.map((line) => ({
+      name: line.name,
+      unit: line.unit,
+      quantity: line.quantity,
+      price: line.customPrice,
+      taxRate: line.taxRate,
+    }))
+
     const newRecord: InvoiceRecord = {
       id: `inv-${Date.now()}`,
       invoiceNumber: meta.invoiceNumber.trim(),
+      clientId: selectedClientId || undefined,
       client: clientName.trim() || 'Client',
       issueDate: meta.issueDate,
       dueDate: meta.dueDate,
       totalAmount: Math.round(totals.grandTotal * 100) / 100,
+      subtotal: Math.round(totals.subTotal * 100) / 100,
+      tax: Math.round(totals.taxTotal * 100) / 100,
       paidAmount: 0,
       status: statusForRow,
+      lines: invoiceLines,
       ...(objectKey ? { pdfObjectKey: objectKey } : {}),
     }
 
@@ -1136,6 +1514,7 @@ function App() {
       draftLines: [],
       clientName,
       clientGstHstNumber,
+      clientId: selectedClientId,
       meta: nextMeta,
       invoices: nextInvoices,
       clients,
@@ -1185,9 +1564,9 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${mobileNavOpen ? ' app-shell--nav-open' : ''}`}>
       {isCognitoConfigured() && authed && (
-        <header className="app-topbar">
+        <header className="app-topbar app-topbar--desktop">
           <div className="app-topbar-inner">
             <span className="app-user-display" title={authUserDisplay ?? undefined}>
               {authUserDisplay ?? '…'}
@@ -1210,8 +1589,72 @@ function App() {
           </div>
         </header>
       )}
+
+      <header className="app-mobile-header">
+        <button
+          type="button"
+          className="icon-btn mobile-nav-toggle"
+          aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
+          aria-expanded={mobileNavOpen}
+          onClick={() => setMobileNavOpen((open) => !open)}
+        >
+          <UiIcon name={mobileNavOpen ? 'close' : 'menu'} />
+        </button>
+        <span className="app-mobile-brand">{APP_BRAND}</span>
+        {isCognitoConfigured() && authed ? (
+          <div className="app-mobile-header-actions">
+            <span className="app-user-display" title={authUserDisplay ?? undefined}>
+              {authUserDisplay ?? '…'}
+            </span>
+            <button
+              type="button"
+              className="ghost app-signout-btn app-signout-btn--compact"
+              onClick={() => {
+                void (async () => {
+                  await signOutUser()
+                  userSessionPinnedRef.current = false
+                  setAuthed(false)
+                  setAuthUserDisplay(null)
+                  setMobileNavOpen(false)
+                  navigate('/login', { replace: true })
+                })()
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        ) : null}
+      </header>
+
+      {mobileNavOpen ? (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close menu"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      ) : null}
+
       <aside className="sidebar">
-        <div className="brand">
+        <div className="sidebar-mobile-toolbar">
+          <div className="brand sidebar-brand-compact">
+            <span className="brand-badge brand-logo-box">
+              <img src={brandLogoPath} alt={`${APP_BRAND} logo`} className="brand-logo" />
+            </span>
+            <div>
+              <h1>{APP_BRAND}</h1>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="icon-btn sidebar-close-btn"
+            aria-label="Close menu"
+            onClick={() => setMobileNavOpen(false)}
+          >
+            <UiIcon name="close" />
+          </button>
+        </div>
+        <div className="brand sidebar-brand-desktop">
           <span className="brand-badge brand-logo-box">
             <img src={brandLogoPath} alt={`${APP_BRAND} logo`} className="brand-logo" />
           </span>
@@ -1219,15 +1662,25 @@ function App() {
             <h1>{APP_BRAND}</h1>
           </div>
         </div>
-        <nav>
-          <NavLink to="/" end>
+        <nav className="sidebar-nav">
+          <NavLink to="/" end onClick={() => setMobileNavOpen(false)}>
             Dashboard
           </NavLink>
-          <NavLink to="/catalog">Items & Services</NavLink>
-          <NavLink to="/create-invoice">Create Invoice</NavLink>
-          <NavLink to="/invoices">Invoices</NavLink>
-          <NavLink to="/clients">Clients</NavLink>
-          <NavLink to="/company">Settings</NavLink>
+          <NavLink to="/catalog" onClick={() => setMobileNavOpen(false)}>
+            Items & Services
+          </NavLink>
+          <NavLink to="/create-invoice" onClick={() => setMobileNavOpen(false)}>
+            Create Invoice
+          </NavLink>
+          <NavLink to="/invoices" onClick={() => setMobileNavOpen(false)}>
+            Invoices
+          </NavLink>
+          <NavLink to="/clients" onClick={() => setMobileNavOpen(false)}>
+            Clients
+          </NavLink>
+          <NavLink to="/company" onClick={() => setMobileNavOpen(false)}>
+            Settings
+          </NavLink>
         </nav>
       </aside>
 
@@ -1244,10 +1697,11 @@ function App() {
                   onSaveWorkspace={persistWorkspace}
                   saveEnabled={workspaceSaveEnabled}
                   saveHint={workspaceSaveHint}
+                  passwordChangeEnabled={isCognitoConfigured() && Boolean(authed)}
                 />
               }
             />
-            <Route path="/catalog" element={<CatalogPage catalog={catalog} setCatalog={setCatalog} />} />
+            <Route path="/catalog" element={<CatalogPage catalog={catalog} onUpdateCatalog={updateCatalog} />} />
             <Route
               path="/create-invoice"
               element={
@@ -1256,8 +1710,10 @@ function App() {
                   setClientName={setClientName}
                   clientGstHstNumber={clientGstHstNumber}
                   setClientGstHstNumber={setClientGstHstNumber}
+                  selectedClientId={selectedClientId}
+                  setSelectedClientId={setSelectedClientId}
                   clients={clients}
-                  setClients={setClients}
+                  onUpdateClients={updateClients}
                   profile={profile}
                   invoices={invoices}
                   meta={meta}
@@ -1276,10 +1732,14 @@ function App() {
             <Route
               path="/invoices"
               element={
-                <InvoicesPage invoices={invoices} setInvoices={setInvoices} />
+                <InvoicesPage
+                  invoices={invoices}
+                  onUpdateInvoices={updateInvoices}
+                  onDeleteInvoice={handleDeleteInvoice}
+                />
               }
             />
-            <Route path="/clients" element={<ClientsPage clients={clients} setClients={setClients} />} />
+            <Route path="/clients" element={<ClientsPage clients={clients} onUpdateClients={updateClients} onDeleteClient={handleDeleteClient} />} />
           </Routes>
         </div>
       </main>
@@ -1291,6 +1751,7 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
   const navigate = useNavigate()
   const now = new Date()
   const todayStr = now.toISOString().slice(0, 10)
+  const [chartPeriod, setChartPeriod] = useState<DashboardChartPeriod>('6month')
 
   const sortedByIssue = useMemo(
     () => [...invoices].sort((a, b) => parseIssueDateMs(b.issueDate) - parseIssueDateMs(a.issueDate)),
@@ -1299,72 +1760,32 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
 
   const totalBilled = useMemo(() => invoices.reduce((a, i) => a + i.totalAmount, 0), [invoices])
   const totalPaid = useMemo(() => invoices.reduce((a, i) => a + i.paidAmount, 0), [invoices])
+  const totalTax = useMemo(() => invoices.reduce((a, i) => a + invoiceTaxAmount(i), 0), [invoices])
+  const pendingReceivables = useMemo(
+    () => invoices.reduce((a, i) => a + Math.max(0, i.totalAmount - i.paidAmount), 0),
+    [invoices],
+  )
+  const openInvoiceCount = useMemo(
+    () => invoices.filter((i) => i.status === 'Open' || i.status === 'Partial' || i.status === 'Overdue').length,
+    [invoices],
+  )
 
   const issuedToday = useMemo(
     () => invoices.filter((i) => i.issueDate === todayStr).reduce((a, i) => a + i.totalAmount, 0),
     [invoices, todayStr],
   )
 
-  const thisWeekTotal = useMemo(() => {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0).getTime()
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime()
-    return invoices.reduce((acc, i) => {
-      const t = parseIssueDateMs(i.issueDate)
-      return t >= start && t <= end ? acc + i.totalAmount : acc
-    }, 0)
-  }, [invoices, now])
-
-  const weekCount = useMemo(() => {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0).getTime()
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime()
-    return invoices.filter((i) => {
-      const t = parseIssueDateMs(i.issueDate)
-      return t >= start && t <= end
-    }).length
-  }, [invoices, now])
-
-  const monthTotal = useMemo(() => {
-    const y = now.getFullYear()
-    const m = now.getMonth()
-    return invoices.reduce((acc, i) => {
-      const d = new Date(parseIssueDateMs(i.issueDate))
-      return d.getFullYear() === y && d.getMonth() === m ? acc + i.totalAmount : acc
-    }, 0)
-  }, [invoices, now])
-
-  const ytdTotal = useMemo(() => {
-    const y = now.getFullYear()
-    return invoices.reduce((acc, i) => {
-      const d = new Date(parseIssueDateMs(i.issueDate))
-      return d.getFullYear() === y ? acc + i.totalAmount : acc
-    }, 0)
-  }, [invoices, now])
-
-  const monthly = useMemo(() => {
-    const out: number[] = []
-    for (let back = 6; back >= 0; back--) {
-      const anchor = new Date(now.getFullYear(), now.getMonth() - back, 1)
-      const y = anchor.getFullYear()
-      const m = anchor.getMonth()
-      const sum = invoices.reduce((acc, inv) => {
-        const d = new Date(parseIssueDateMs(inv.issueDate))
-        return d.getFullYear() === y && d.getMonth() === m ? acc + inv.totalAmount : acc
-      }, 0)
-      out.push(sum)
-    }
-    return out
-  }, [invoices, now])
-
-  const monthLabels = useMemo(() => {
-    const labels: string[] = []
-    for (let back = 6; back >= 0; back--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - back, 1)
-      labels.push(d.toLocaleString('en-CA', { month: 'short' }))
-    }
-    return labels
-  }, [now])
-
-  const maxMonthly = useMemo(() => Math.max(...monthly, 1), [monthly])
+  const chartBuckets = useMemo(
+    () => buildDashboardBuckets(invoices, chartPeriod, now),
+    [invoices, chartPeriod, now],
+  )
+  const maxChartValue = useMemo(
+    () => Math.max(...chartBuckets.map((b) => Math.max(b.billed, b.paid)), 1),
+    [chartBuckets],
+  )
+  const periodBilled = useMemo(() => chartBuckets.reduce((a, b) => a + b.billed, 0), [chartBuckets])
+  const periodPaid = useMemo(() => chartBuckets.reduce((a, b) => a + b.paid, 0), [chartBuckets])
+  const periodTax = useMemo(() => chartBuckets.reduce((a, b) => a + b.tax, 0), [chartBuckets])
 
   const collectionRate =
     totalBilled > 0 ? `${Math.round((totalPaid / totalBilled) * 1000) / 10}%` : '—'
@@ -1385,100 +1806,120 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
         status: inv.status,
         due: inv.dueDate,
         amount: formatUsd(inv.totalAmount),
+        pending: formatUsd(Math.max(0, inv.totalAmount - inv.paidAmount)),
       })),
     [sortedByIssue],
   )
 
   const hasData = invoices.length > 0
+  const periodLabels: Record<DashboardChartPeriod, string> = {
+    week: 'Last 7 days',
+    month: 'Last 4 weeks',
+    '6month': 'Last 6 months',
+    year: 'Last 12 months',
+  }
 
   return (
     <section>
       <div className="page-head">
         <div>
           <h2>Dashboard</h2>
-          <p className="muted">Quick snapshot of cashflow, outstanding work, and next actions.</p>
+          <p className="muted">Tax, collections, and receivables with period-based revenue charts.</p>
         </div>
         <div className="row">
-          <button type="button" className="ghost">
-            Export
-          </button>
           <button type="button" className="primary" onClick={() => navigate('/create-invoice')}>
             New Invoice
           </button>
         </div>
       </div>
 
-      <div className="dashboard-actions">
-        <button className="icon-btn" title="Send reminder" aria-label="Send reminder">
-          <UiIcon name="check" />
-        </button>
-        <button className="icon-btn" title="Quick filter" aria-label="Quick filter">
-          <UiIcon name="filter" />
-        </button>
-        <button className="icon-btn" title="Customize columns" aria-label="Customize columns">
-          <UiIcon name="columns" />
-        </button>
-        <button className="icon-btn" title="Search records" aria-label="Search records">
-          <UiIcon name="search" />
-        </button>
-      </div>
-
-      <div className="stats-grid">
+      <div className="stats-grid dashboard-finance-grid">
         <article className="card kpi-card">
-          <p className="muted">Issued today</p>
-          <h3>{formatUsd(issuedToday)}</h3>
-          <p className="tiny">{hasData ? 'Total amount on invoices dated today' : 'No invoices yet'}</p>
+          <p className="muted">Total billed</p>
+          <h3>{formatUsd(totalBilled)}</h3>
+          <p className="tiny">{hasData ? `${invoices.length} invoice${invoices.length === 1 ? '' : 's'} all time` : 'No invoices yet'}</p>
         </article>
         <article className="card kpi-card">
-          <p className="muted">This week</p>
-          <h3>{formatUsd(thisWeekTotal)}</h3>
-          <p className="tiny">
-            {weekCount === 0 && !hasData ? 'Last 7 days' : `${weekCount} invoice${weekCount === 1 ? '' : 's'} in the last 7 days`}
-          </p>
+          <p className="muted">Payments received</p>
+          <h3 className="kpi-up">{formatUsd(totalPaid)}</h3>
+          <p className="tiny">Collection rate {collectionRate}</p>
         </article>
         <article className="card kpi-card">
-          <p className="muted">This month</p>
-          <h3>{formatUsd(monthTotal)}</h3>
-          <p className="tiny">Billed in the current calendar month</p>
+          <p className="muted">Pending receivables</p>
+          <h3 className="danger">{formatUsd(pendingReceivables)}</h3>
+          <p className="tiny">{openInvoiceCount} open / partial / overdue</p>
         </article>
         <article className="card kpi-card">
-          <p className="muted">Year-to-date</p>
-          <h3>{formatUsd(ytdTotal)}</h3>
-          <p className="tiny">Billed so far this calendar year</p>
+          <p className="muted">Total HST/GST</p>
+          <h3>{formatUsd(totalTax)}</h3>
+          <p className="tiny">Tax on issued invoice totals</p>
         </article>
       </div>
 
       <div className="split-grid">
         <div className="card">
           <div className="dashboard-panel-head">
-            <h3>Revenue Trend</h3>
-            <span className="mini-trend">Last 7 months</span>
+            <h3>Revenue &amp; collections</h3>
+            <div className="dashboard-period-tabs" role="tablist" aria-label="Chart period">
+              {(
+                [
+                  ['week', 'Weekly'],
+                  ['month', 'Monthly'],
+                  ['6month', '6 months'],
+                  ['year', 'Yearly'],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={chartPeriod === key}
+                  className={`dashboard-period-tab ${chartPeriod === key ? 'active' : ''}`}
+                  onClick={() => setChartPeriod(key)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="bars">
-            {monthly.map((value, i) => (
-              <div key={`${monthLabels[i]}-${i}`} className="bar-wrap">
-                <div
-                  className="bar"
-                  style={{ height: `${Math.max(4, Math.round((value / maxMonthly) * 72))}px` }}
-                />
-                <span>{monthLabels[i]}</span>
+          <p className="muted dashboard-period-caption">{periodLabels[chartPeriod]}</p>
+          <div className="dashboard-chart-legend">
+            <span><i className="legend-dot legend-billed" /> Billed</span>
+            <span><i className="legend-dot legend-paid" /> Received</span>
+          </div>
+          <div className="bars dashboard-dual-bars">
+            {chartBuckets.map((bucket, i) => (
+              <div key={`${bucket.label}-${i}`} className="bar-wrap">
+                <div className="bar-group">
+                  <div
+                    className="bar bar-billed"
+                    title={`Billed ${formatUsd(bucket.billed)}`}
+                    style={{ height: `${Math.max(4, Math.round((bucket.billed / maxChartValue) * 88))}px` }}
+                  />
+                  <div
+                    className="bar bar-paid"
+                    title={`Received ${formatUsd(bucket.paid)}`}
+                    style={{ height: `${Math.max(4, Math.round((bucket.paid / maxChartValue) * 88))}px` }}
+                  />
+                </div>
+                <span>{bucket.label}</span>
               </div>
             ))}
           </div>
-          <p className="muted" style={{ marginTop: '0.6rem' }}>
-            {hasData
-              ? 'Totals use each invoice issue date and billed amount.'
-              : 'Create invoices to see a seven-month trend from your workspace.'}
-          </p>
+          <div className="dashboard-period-summary">
+            <span>Billed {formatUsd(periodBilled)}</span>
+            <span>Received {formatUsd(periodPaid)}</span>
+            <span>Tax {formatUsd(periodTax)}</span>
+          </div>
         </div>
         <div className="card">
           <div className="dashboard-panel-head">
-            <h3>Action Center</h3>
-            <span className="mini-trend">Today</span>
+            <h3>Collections snapshot</h3>
+            <span className="mini-trend">Today {formatUsd(issuedToday)}</span>
           </div>
           <div className="kpi-list">
             <div className="kpi-row">
-              <span>Collection Rate</span>
+              <span>Collection rate</span>
               <strong>{collectionRate}</strong>
             </div>
             <div className="kpi-row">
@@ -1486,32 +1927,12 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
               <strong className="danger">{formatUsd(overdueExposure)}</strong>
             </div>
             <div className="kpi-row">
-              <span>Tax reserve</span>
-              <strong>—</strong>
+              <span>Pending payments</span>
+              <strong>{formatUsd(pendingReceivables)}</strong>
             </div>
-          </div>
-          <div className="milestone-list" style={{ marginTop: '0.7rem' }}>
-            <div className="milestone-row">
-              <span className={`dot ${hasData ? 'done' : 'progress'}`} />
-              <div>
-                <strong>{hasData ? 'Keep invoices current' : 'Set up company profile'}</strong>
-                <p className="muted">
-                  {hasData
-                    ? 'Paid amounts vs totals feed the collection rate above.'
-                    : 'Add your business details under Company, then create your first invoice.'}
-                </p>
-              </div>
-            </div>
-            <div className="milestone-row">
-              <span className="dot progress" />
-              <div>
-                <strong>{hasData ? 'Follow up on overdue' : 'Build your catalog'}</strong>
-                <p className="muted">
-                  {hasData
-                    ? 'Overdue exposure uses unpaid balance on overdue invoices.'
-                    : 'Line items can be saved in Catalog for faster invoicing.'}
-                </p>
-              </div>
+            <div className="kpi-row">
+              <span>Tax in selected period</span>
+              <strong>{formatUsd(periodTax)}</strong>
             </div>
           </div>
         </div>
@@ -1530,26 +1951,28 @@ function Dashboard({ invoices }: { invoices: InvoiceRecord[] }) {
             <UiIcon name="view" />
           </button>
         </div>
-        <div className="invoice-table">
-          <div className="invoice-table-head dashboard-invoice-grid">
+        <div className="invoice-table mobile-stack-table">
+          <div className="invoice-table-head dashboard-invoice-grid dashboard-invoice-grid-ext">
             <span>Invoice</span>
             <span>Client</span>
             <span>Status</span>
             <span>Due Date</span>
             <span>Amount</span>
+            <span>Pending</span>
           </div>
           {recentRows.length === 0 ? (
             <p className="muted" style={{ padding: '1rem 0.5rem' }}>
-              No invoices yet. Use New Invoice to add your first record; it is stored in your cloud workspace.
+              No invoices yet. Use New Invoice to add your first record.
             </p>
           ) : (
             recentRows.map((invoice) => (
-              <div key={invoice.no} className="invoice-table-row dashboard-invoice-grid">
-                <span>{invoice.no}</span>
-                <span>{invoice.client}</span>
-                <span className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
-                <span>{invoice.due}</span>
-                <strong>{invoice.amount}</strong>
+              <div key={invoice.no} className="invoice-table-row dashboard-invoice-grid dashboard-invoice-grid-ext mobile-stack-row">
+                <span data-label="Invoice">{invoice.no}</span>
+                <span data-label="Client">{invoice.client}</span>
+                <span data-label="Status" className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
+                <span data-label="Due">{invoice.due}</span>
+                <strong data-label="Amount">{invoice.amount}</strong>
+                <span data-label="Pending" className="danger">{invoice.pending}</span>
               </div>
             ))
           )}
@@ -1565,12 +1988,14 @@ function CompanyPage({
   onSaveWorkspace,
   saveEnabled,
   saveHint,
+  passwordChangeEnabled,
 }: {
   profile: CompanyProfile
   onChange: (profile: CompanyProfile) => void
   onSaveWorkspace: () => Promise<void>
   saveEnabled: boolean
   saveHint?: string
+  passwordChangeEnabled: boolean
 }) {
   const MAX_LOGO_UPLOAD_BYTES = 2_000_000
   const setValue = (key: keyof CompanyProfile, value: string) => {
@@ -1610,6 +2035,8 @@ function CompanyPage({
   const [cloudSyncMsg, setCloudSyncMsg] = useState<string | null>(null)
   const [workspaceSaveBusy, setWorkspaceSaveBusy] = useState(false)
   const [workspaceSaveMsg, setWorkspaceSaveMsg] = useState<string | null>(null)
+  const [passwordChangeBusy, setPasswordChangeBusy] = useState(false)
+  const [passwordChangeMsg, setPasswordChangeMsg] = useState<string | null>(null)
   const [logoUploadMsg, setLogoUploadMsg] = useState<string | null>(null)
 
   const handleSaveWorkspace = () => {
@@ -1623,6 +2050,41 @@ function CompanyPage({
         setWorkspaceSaveMsg(e instanceof Error ? e.message : 'Save failed')
       } finally {
         setWorkspaceSaveBusy(false)
+      }
+    })()
+  }
+
+  const handlePasswordChange = () => {
+    setPasswordChangeMsg(null)
+    const current = passwordForm.currentPassword
+    const next = passwordForm.newPassword
+    const confirm = passwordForm.confirmPassword
+    if (!passwordChangeEnabled) {
+      setPasswordChangeMsg('Sign in with your cloud account to change password.')
+      return
+    }
+    if (!current || !next || !confirm) {
+      setPasswordChangeMsg('Fill in all password fields.')
+      return
+    }
+    if (next !== confirm) {
+      setPasswordChangeMsg('New password and confirmation do not match.')
+      return
+    }
+    if (!isStrongPassword(next)) {
+      setPasswordChangeMsg('Use at least 8 characters with uppercase, number, and symbol.')
+      return
+    }
+    setPasswordChangeBusy(true)
+    void (async () => {
+      try {
+        await changeUserPassword(current, next)
+        setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' })
+        setPasswordChangeMsg('Password updated.')
+      } catch (err) {
+        setPasswordChangeMsg(err instanceof Error ? err.message : 'Password change failed.')
+      } finally {
+        setPasswordChangeBusy(false)
       }
     })()
   }
@@ -1818,14 +2280,17 @@ function CompanyPage({
           <div className="group-box-stack">
             <div className="group-box-grid">
               <fieldset className="group-box">
-                <legend>Bank account details</legend>
+                <legend>Canadian bank account (EFT)</legend>
+                <p className="muted payment-field-help">
+                  Standard Canadian routing: 3-digit institution number, 5-digit transit (branch), then account number.
+                </p>
                 <div className="form-grid two-col-simple">
                   <label>
                     Account holder name
                     <input
                       value={profile.paymentAccountName}
                       onChange={(e) => setValue('paymentAccountName', e.target.value)}
-                      placeholder="Legal account holder name"
+                      placeholder="Legal name on the account"
                     />
                   </label>
                   <label>
@@ -1833,27 +2298,50 @@ function CompanyPage({
                     <input
                       value={profile.paymentInstitutionName}
                       onChange={(e) => setValue('paymentInstitutionName', e.target.value)}
-                      placeholder="Bank or credit union"
+                      placeholder="e.g. RBC, TD, Scotiabank"
+                    />
+                  </label>
+                  <label>
+                    Institution number
+                    <input
+                      inputMode="numeric"
+                      value={profile.paymentInstitutionNumber}
+                      onChange={(e) => setValue('paymentInstitutionNumber', e.target.value.replace(/\D/g, '').slice(0, 3))}
+                      placeholder="001"
+                      maxLength={3}
                     />
                   </label>
                   <label>
                     Transit number
                     <input
+                      inputMode="numeric"
                       value={profile.paymentTransitNumber}
-                      onChange={(e) => setValue('paymentTransitNumber', e.target.value)}
-                      placeholder="00011"
-                    />
-                  </label>
-                  <label>
-                    Account number
-                    <input
-                      value={profile.paymentAccountNumber}
-                      onChange={(e) => setValue('paymentAccountNumber', e.target.value)}
-                      placeholder="Account number"
+                      onChange={(e) => setValue('paymentTransitNumber', e.target.value.replace(/\D/g, '').slice(0, 5))}
+                      placeholder="12345"
+                      maxLength={5}
                     />
                   </label>
                   <label className="invoice-field-span">
-                    Payment email
+                    Account number
+                    <input
+                      inputMode="numeric"
+                      value={profile.paymentAccountNumber}
+                      onChange={(e) => setValue('paymentAccountNumber', e.target.value.replace(/\D/g, '').slice(0, 12))}
+                      placeholder="7–12 digits"
+                      maxLength={12}
+                    />
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset className="group-box">
+                <legend>Interac e-Transfer</legend>
+                <p className="muted payment-field-help">
+                  Email used for Interac e-Transfer payments (shown on invoices and client payment instructions).
+                </p>
+                <div className="form-grid two-col-simple">
+                  <label className="invoice-field-span">
+                    e-Transfer email
                     <input
                       type="email"
                       value={profile.paymentEmail}
@@ -1862,6 +2350,18 @@ function CompanyPage({
                     />
                   </label>
                 </div>
+                {(profile.paymentInstitutionNumber || profile.paymentTransitNumber || profile.paymentAccountNumber || profile.paymentEmail) && (
+                  <div className="payment-preview card-lite">
+                    <strong>Payment preview</strong>
+                    {profile.paymentInstitutionNumber && profile.paymentTransitNumber && profile.paymentAccountNumber ? (
+                      <p>
+                        EFT: {profile.paymentInstitutionNumber}-{profile.paymentTransitNumber}-{profile.paymentAccountNumber}
+                        {profile.paymentInstitutionName ? ` · ${profile.paymentInstitutionName}` : ''}
+                      </p>
+                    ) : null}
+                    {profile.paymentEmail ? <p>Interac e-Transfer: {profile.paymentEmail}</p> : null}
+                  </div>
+                )}
               </fieldset>
 
               <fieldset className="group-box">
@@ -1984,6 +2484,24 @@ function CompanyPage({
                   <span>Password strength rule</span>
                   <strong>Min 8 chars, uppercase, number, symbol</strong>
                 </div>
+                {!passwordChangeEnabled && (
+                  <p className="muted">Sign in to change your account password.</p>
+                )}
+                {passwordChangeMsg && (
+                  <p className={passwordChangeMsg === 'Password updated.' ? 'muted' : 'danger'} role="status">
+                    {passwordChangeMsg}
+                  </p>
+                )}
+                <div className="editor-actions">
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={!passwordChangeEnabled || passwordChangeBusy}
+                    onClick={handlePasswordChange}
+                  >
+                    {passwordChangeBusy ? 'Updating…' : 'Update password'}
+                  </button>
+                </div>
               </div>
             </fieldset>
           </div>
@@ -2021,12 +2539,14 @@ function CompanyPage({
 
 function CatalogPage({
   catalog,
-  setCatalog,
+  onUpdateCatalog,
 }: {
   catalog: CatalogItem[]
-  setCatalog: (items: CatalogItem[]) => void
+  onUpdateCatalog: (items: CatalogItem[]) => Promise<void>
 }) {
   const [showAddItemModal, setShowAddItemModal] = useState(false)
+  const [catalogBusy, setCatalogBusy] = useState(false)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
   const [newItem, setNewItem] = useState({
     name: '',
     defaultPrice: 0,
@@ -2045,7 +2565,7 @@ function CatalogPage({
   })
 
   const saveNewItem = () => {
-    if (!newItem.name.trim()) return
+    if (!newItem.name.trim() || catalogBusy) return
     const next: CatalogItem = {
       id: Date.now(),
       type: newItem.type,
@@ -2054,15 +2574,25 @@ function CatalogPage({
       defaultPrice: newItem.defaultPrice,
       taxRate: newItem.taxRate,
     }
-    setCatalog([...catalog, next])
-    setShowAddItemModal(false)
-    setNewItem({
-      name: '',
-      defaultPrice: 0,
-      type: 'Service',
-      unit: 'Hour',
-      taxRate: 13,
-    })
+    setCatalogBusy(true)
+    setCatalogError(null)
+    void (async () => {
+      try {
+        await onUpdateCatalog([...catalog, next])
+        setShowAddItemModal(false)
+        setNewItem({
+          name: '',
+          defaultPrice: 0,
+          type: 'Service',
+          unit: 'Hour',
+          taxRate: 13,
+        })
+      } catch (err) {
+        setCatalogError(err instanceof Error ? err.message : 'Could not save catalog item')
+      } finally {
+        setCatalogBusy(false)
+      }
+    })()
   }
 
   const filteredCatalog = catalog.filter((item) =>
@@ -2085,29 +2615,50 @@ function CatalogPage({
   }
 
   const saveEdit = () => {
-    if (!editingId || !editForm.name.trim()) return
-    setCatalog(
-      catalog.map((item) =>
-        item.id === editingId
-          ? {
-              ...item,
-              name: editForm.name.trim(),
-              type: editForm.type,
-              unit: editForm.unit,
-              defaultPrice: editForm.defaultPrice,
-              taxRate: editForm.taxRate,
-            }
-          : item,
-      ),
+    if (!editingId || !editForm.name.trim() || catalogBusy) return
+    const updated = catalog.map((item) =>
+      item.id === editingId
+        ? {
+            ...item,
+            name: editForm.name.trim(),
+            type: editForm.type,
+            unit: editForm.unit,
+            defaultPrice: editForm.defaultPrice,
+            taxRate: editForm.taxRate,
+          }
+        : item,
     )
-    setEditingId(null)
+    setCatalogBusy(true)
+    setCatalogError(null)
+    void (async () => {
+      try {
+        await onUpdateCatalog(updated)
+        setEditingId(null)
+      } catch (err) {
+        setCatalogError(err instanceof Error ? err.message : 'Could not update catalog item')
+      } finally {
+        setCatalogBusy(false)
+      }
+    })()
   }
 
   const deleteItem = (itemId: number) => {
-    setCatalog(catalog.filter((item) => item.id !== itemId))
-    if (editingId === itemId) {
-      setEditingId(null)
-    }
+    if (catalogBusy) return
+    const updated = catalog.filter((item) => item.id !== itemId)
+    setCatalogBusy(true)
+    setCatalogError(null)
+    void (async () => {
+      try {
+        await onUpdateCatalog(updated)
+        if (editingId === itemId) {
+          setEditingId(null)
+        }
+      } catch (err) {
+        setCatalogError(err instanceof Error ? err.message : 'Could not delete catalog item')
+      } finally {
+        setCatalogBusy(false)
+      }
+    })()
   }
 
   return (
@@ -2118,6 +2669,12 @@ function CatalogPage({
           <p className="muted">Reusable price catalog for faster invoice drafting and fewer input errors.</p>
         </div>
       </div>
+
+      {catalogError && (
+        <p className="danger" role="alert" style={{ marginBottom: '0.75rem' }}>
+          {catalogError}
+        </p>
+      )}
 
       <div className="table-toolbar">
         <div className="search-box compact">
@@ -2139,7 +2696,7 @@ function CatalogPage({
         </div>
       </div>
 
-      <div className="data-grid table">
+      <div className="data-grid table mobile-stack-table">
         <div className="data-grid-head table-row table-head-row catalog-row">
           <strong>Name</strong>
           <strong>Type</strong>
@@ -2149,14 +2706,14 @@ function CatalogPage({
           <strong>Actions</strong>
         </div>
         {filteredCatalog.map((item) => (
-          <div key={item.id} className="catalog-block">
-            <div className="data-grid-row table-row catalog-row">
-              <span>{item.name}</span>
-              <span>{item.type}</span>
-              <span>{item.unit}</span>
-              <span>${item.defaultPrice.toFixed(2)}</span>
-              <span>{item.taxRate}%</span>
-              <div className="row-actions">
+          <div key={item.id} className="catalog-block mobile-stack-card">
+            <div className="data-grid-row table-row catalog-row mobile-stack-row">
+              <span data-label="Name">{item.name}</span>
+              <span data-label="Type">{item.type}</span>
+              <span data-label="Unit">{item.unit}</span>
+              <span data-label="Rate">${item.defaultPrice.toFixed(2)}</span>
+              <span data-label="Tax">{item.taxRate}%</span>
+              <div className="row-actions cell-actions" data-label="Actions">
                 <button className="icon-btn" title="Edit Item" aria-label="Edit Item" onClick={() => startEdit(item)}>
                   <UiIcon name="edit" />
                 </button>
@@ -2303,8 +2860,10 @@ function CreateInvoicePage({
   setClientName,
   clientGstHstNumber,
   setClientGstHstNumber,
+  selectedClientId: _selectedClientId,
+  setSelectedClientId,
   clients,
-  setClients,
+  onUpdateClients,
   profile,
   invoices,
   meta,
@@ -2322,8 +2881,10 @@ function CreateInvoicePage({
   setClientName: (name: string) => void
   clientGstHstNumber: string
   setClientGstHstNumber: (value: string) => void
+  selectedClientId: string
+  setSelectedClientId: (value: string) => void
   clients: ClientRecord[]
-  setClients: (clients: ClientRecord[]) => void
+  onUpdateClients: (clients: ClientRecord[]) => Promise<void>
   profile: CompanyProfile
   invoices: InvoiceRecord[]
   meta: InvoiceMeta
@@ -2398,6 +2959,7 @@ function CreateInvoicePage({
     setClientQuery(value)
     setClientName(value)
     setClientGstHstNumber('')
+    setSelectedClientId('')
     setShowClientOptions(true)
   }
 
@@ -2406,6 +2968,7 @@ function CreateInvoicePage({
     setClientQuery(label)
     setClientName(label)
     setClientGstHstNumber(client.gstHstNumber || '')
+    setSelectedClientId(client.id)
     setShowClientOptions(false)
   }
 
@@ -2431,7 +2994,7 @@ function CreateInvoicePage({
     )
       return
     const created: ClientRecord = {
-      id: `cl-${Date.now()}`,
+      id: getNextClientId(clients),
       name: newClient.name.trim(),
       company: newClient.company.trim(),
       email: newClient.email.trim(),
@@ -2443,20 +3006,26 @@ function CreateInvoicePage({
       gstHstNumber: newClient.gstHstNumber.trim(),
       totalInvoiced: 0,
     }
-    setClients([created, ...clients])
-    chooseClient(created)
-    setShowAddClientModal(false)
-    setNewClient({
-      name: '',
-      company: '',
-      email: '',
-      phone: '',
-      streetAddress: '',
-      city: '',
-      province: '',
-      postalCode: '',
-      gstHstNumber: '',
-    })
+    void (async () => {
+      try {
+        await onUpdateClients([created, ...clients])
+        chooseClient(created)
+        setShowAddClientModal(false)
+        setNewClient({
+          name: '',
+          company: '',
+          email: '',
+          phone: '',
+          streetAddress: '',
+          city: '',
+          province: '',
+          postalCode: '',
+          gstHstNumber: '',
+        })
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : 'Could not save client')
+      }
+    })()
   }
 
   return (
@@ -2632,6 +3201,7 @@ function CreateInvoicePage({
               Per-line HST/GST uses each catalog item tax rate.
             </p>
             <div className="table-scroll">
+              <p className="mobile-table-scroll-hint">Swipe for all columns</p>
               <div className="invoice-line-table">
               <div className="invoice-line-head">
                 <span>Description</span>
@@ -2748,10 +3318,6 @@ function CreateInvoicePage({
             <span>Total Due</span>
             <strong>${totals.grandTotal.toFixed(2)}</strong>
           </div>
-          <p className="muted">
-            Same pattern as CTrackr: PDF bytes go to S3 (presigned PUT); invoice fields and{' '}
-            <code>pdfObjectKey</code> live in DynamoDB inside your workspace payload (Lambda on PUT /workspace).
-          </p>
         </aside>
       </div>
 
@@ -2859,16 +3425,23 @@ function CreateInvoicePage({
 
 function InvoicesPage({
   invoices,
-  setInvoices,
+  onUpdateInvoices,
+  onDeleteInvoice,
 }: {
   invoices: InvoiceRecord[]
-  setInvoices: (invoices: InvoiceRecord[]) => void
+  onUpdateInvoices: (invoices: InvoiceRecord[]) => Promise<void>
+  onDeleteInvoice: (invoiceId: string, invoiceNumber: string) => Promise<void>
 }) {
   const [paymentAmount, setPaymentAmount] = useState<Record<string, number>>({})
   const [paymentChannel, setPaymentChannel] = useState<Record<string, InvoiceRecord['paymentChannel']>>({})
   const [invoiceSearch, setInvoiceSearch] = useState('')
-  const [showPaymentPanel, setShowPaymentPanel] = useState(true)
+  const [paymentBusyId, setPaymentBusyId] = useState<string | null>(null)
+  const [paymentError, setPaymentError] = useState<string | null>(null)
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<InvoiceRecord | null>(null)
+  const [deleteConfirmNumber, setDeleteConfirmNumber] = useState('')
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [invoiceEditForm, setInvoiceEditForm] = useState({
     client: '',
     issueDate: '',
@@ -2882,13 +3455,13 @@ function InvoicesPage({
   const applyPayment = (invoice: InvoiceRecord) => {
     const amount = paymentAmount[invoice.id] || 0
     const channel = paymentChannel[invoice.id] || 'Interac'
-    if (amount <= 0) return
+    if (amount <= 0 || isInvoiceFullyPaid(invoice)) return
 
     const updated = invoices.map((item) => {
       if (item.id !== invoice.id) return item
       const nextPaid = Math.min(item.totalAmount, item.paidAmount + amount)
       const remaining = item.totalAmount - nextPaid
-      const nextStatus: InvoiceRecord['status'] = remaining <= 0 ? 'Paid' : nextPaid > 0 ? 'Partial' : 'Open'
+      const nextStatus: InvoiceRecord['status'] = remaining <= 0.005 ? 'Paid' : nextPaid > 0 ? 'Partial' : 'Open'
       return {
         ...item,
         paidAmount: nextPaid,
@@ -2897,8 +3470,18 @@ function InvoicesPage({
       }
     })
 
-    setInvoices(updated)
-    setPaymentAmount((prev) => ({ ...prev, [invoice.id]: 0 }))
+    setPaymentBusyId(invoice.id)
+    setPaymentError(null)
+    void (async () => {
+      try {
+        await onUpdateInvoices(updated)
+        setPaymentAmount((prev) => ({ ...prev, [invoice.id]: 0 }))
+      } catch (err) {
+        setPaymentError(err instanceof Error ? err.message : 'Payment save failed')
+      } finally {
+        setPaymentBusyId(null)
+      }
+    })()
   }
 
   const filteredInvoices = invoices.filter((invoice) =>
@@ -2924,24 +3507,72 @@ function InvoicesPage({
 
   const saveInvoiceEdit = () => {
     if (!editingInvoiceId || !invoiceEditForm.client.trim()) return
-    setInvoices(
-      invoices.map((invoice) =>
-        invoice.id === editingInvoiceId
-          ? {
-              ...invoice,
-              client: invoiceEditForm.client.trim(),
-              issueDate: invoiceEditForm.issueDate,
-              dueDate: invoiceEditForm.dueDate,
-              totalAmount: Math.max(0, invoiceEditForm.totalAmount),
-              paidAmount: Math.max(0, Math.min(invoiceEditForm.paidAmount, invoiceEditForm.totalAmount)),
-              status: invoiceEditForm.status,
-              paymentChannel: invoiceEditForm.paymentChannel,
-            }
-          : invoice,
-      ),
+    const updated = invoices.map((invoice) =>
+      invoice.id === editingInvoiceId
+        ? {
+            ...invoice,
+            client: invoiceEditForm.client.trim(),
+            issueDate: invoiceEditForm.issueDate,
+            dueDate: invoiceEditForm.dueDate,
+            totalAmount: Math.max(0, invoiceEditForm.totalAmount),
+            paidAmount: Math.max(0, Math.min(invoiceEditForm.paidAmount, invoiceEditForm.totalAmount)),
+            status: invoiceEditForm.status,
+            paymentChannel: invoiceEditForm.paymentChannel,
+          }
+        : invoice,
     )
-    setEditingInvoiceId(null)
+    setPaymentError(null)
+    void (async () => {
+      try {
+        await onUpdateInvoices(updated)
+        setEditingInvoiceId(null)
+      } catch (err) {
+        setPaymentError(err instanceof Error ? err.message : 'Invoice update failed')
+      }
+    })()
   }
+
+  const openDeleteModal = (invoice: InvoiceRecord) => {
+    if (editingInvoiceId === invoice.id) {
+      cancelInvoiceEdit()
+    }
+    setDeleteTarget(invoice)
+    setDeleteConfirmNumber('')
+    setDeleteError(null)
+  }
+
+  const closeDeleteModal = () => {
+    if (deleteBusy) return
+    setDeleteTarget(null)
+    setDeleteConfirmNumber('')
+    setDeleteError(null)
+  }
+
+  const confirmDeleteInvoice = () => {
+    if (!deleteTarget) return
+    const expected = deleteTarget.invoiceNumber.trim()
+    const typed = deleteConfirmNumber.trim()
+    if (typed !== expected) {
+      setDeleteError(`Type ${expected} exactly to confirm deletion.`)
+      return
+    }
+    setDeleteBusy(true)
+    setDeleteError(null)
+    void (async () => {
+      try {
+        await onDeleteInvoice(deleteTarget.id, expected)
+        setDeleteTarget(null)
+        setDeleteConfirmNumber('')
+      } catch (err) {
+        setDeleteError(err instanceof Error ? err.message : 'Delete failed')
+      } finally {
+        setDeleteBusy(false)
+      }
+    })()
+  }
+
+  const deleteConfirmMatches =
+    deleteTarget != null && deleteConfirmNumber.trim() === deleteTarget.invoiceNumber.trim()
 
   return (
     <section>
@@ -2949,11 +3580,6 @@ function InvoicesPage({
         <div>
           <h2>Invoices</h2>
           <p className="muted">View all invoices and process incoming payments quickly.</p>
-        </div>
-        <div className="row">
-          <button onClick={() => setShowPaymentPanel((prev) => !prev)}>
-            {showPaymentPanel ? 'Hide Payments Panel' : 'Show Payments Panel'}
-          </button>
         </div>
       </div>
 
@@ -2977,8 +3603,13 @@ function InvoicesPage({
         </article>
       </div>
 
-      {showPaymentPanel && (
-        <div className="card section-panel">
+      {paymentError && (
+        <p className="danger" role="alert" style={{ marginBottom: '0.75rem' }}>
+          {paymentError}
+        </p>
+      )}
+
+      <div className="card section-panel">
           <div className="page-head">
             <h3>Record payments</h3>
           </div>
@@ -3002,7 +3633,7 @@ function InvoicesPage({
               </button>
             </div>
           </div>
-          <div className="data-grid invoice-table">
+          <div className="data-grid invoice-table mobile-stack-table">
             <div className="data-grid-head invoice-table-head invoice-grid">
               <span />
               <span>Invoice</span>
@@ -3014,64 +3645,27 @@ function InvoicesPage({
               <span>Actions</span>
             </div>
             {filteredInvoices.map((invoice) => {
-              const remaining = Math.max(0, invoice.totalAmount - invoice.paidAmount)
+              const remaining = invoiceRemainingAmount(invoice)
+              const fullyPaid = isInvoiceFullyPaid(invoice)
               return (
-                <div key={invoice.id} className="payment-row">
-                  <div className="data-grid-row invoice-table-row invoice-grid">
-                    <span>
-                      <input type="checkbox" />
+                <div key={invoice.id} className="payment-row mobile-stack-card">
+                  <div className="data-grid-row invoice-table-row invoice-grid mobile-stack-row">
+                    <span className="cell-checkbox">
+                      <input type="checkbox" aria-label={`Select ${invoice.invoiceNumber}`} />
                     </span>
-                    <span>{invoice.invoiceNumber}</span>
-                    <span>{invoice.client}</span>
-                    <span className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
-                    <span>{invoice.issueDate}</span>
-                    <span>{invoice.dueDate}</span>
-                    <strong>${invoice.totalAmount.toFixed(2)}</strong>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      title={editingInvoiceId === invoice.id ? 'Close Edit' : 'Quick Edit'}
-                      aria-label={editingInvoiceId === invoice.id ? 'Close Edit' : 'Quick Edit'}
-                      onClick={() => (editingInvoiceId === invoice.id ? cancelInvoiceEdit() : startInvoiceEdit(invoice))}
-                    >
-                      <UiIcon name="edit" />
-                    </button>
-                  </div>
-                  <div className="payment-controls">
-                    <span className="muted payment-meta">
-                      Paid: ${invoice.paidAmount.toFixed(2)} | Remaining: ${remaining.toFixed(2)}
-                    </span>
-                    <select
-                      className="payment-channel-field"
-                      value={paymentChannel[invoice.id] || 'Interac'}
-                      onChange={(e) =>
-                        setPaymentChannel((prev) => ({
-                          ...prev,
-                          [invoice.id]: e.target.value as InvoiceRecord['paymentChannel'],
-                        }))
-                      }
-                    >
-                      <option>Interac</option>
-                      <option>Bank Transfer</option>
-                      <option>Credit Card</option>
-                      <option>Cash</option>
-                    </select>
-                    <input
-                      type="number"
-                      className="payment-amount-field"
-                      value={paymentAmount[invoice.id] || 0}
-                      onChange={(e) =>
-                        setPaymentAmount((prev) => ({ ...prev, [invoice.id]: Number(e.target.value) || 0 }))
-                      }
-                      placeholder="Payment amount"
-                    />
-                    <div className="payment-actions">
+                    <span data-label="Invoice">{invoice.invoiceNumber}</span>
+                    <span data-label="Client">{invoice.client}</span>
+                    <span data-label="Status" className={`status-chip status-${invoice.status.toLowerCase()}`}>{invoice.status}</span>
+                    <span data-label="Issue">{invoice.issueDate}</span>
+                    <span data-label="Due">{invoice.dueDate}</span>
+                    <strong data-label="Total">${invoice.totalAmount.toFixed(2)}</strong>
+                    <span className="invoice-row-actions cell-actions" data-label="Actions">
                       {invoice.pdfObjectKey && isApiConfigured() ? (
                         <button
                           type="button"
-                          className="ghost"
-                          style={{ fontSize: '0.78rem', padding: '0.35rem 0.55rem' }}
-                          title="Open PDF from S3"
+                          className="icon-btn"
+                          title="Open PDF"
+                          aria-label="Open PDF"
                           onClick={() => {
                             void (async () => {
                               const url = await getInvoicePdfDownloadUrl(invoice.pdfObjectKey!)
@@ -3080,10 +3674,71 @@ function InvoicesPage({
                             })()
                           }}
                         >
-                          PDF
+                          <UiIcon name="view" />
                         </button>
                       ) : null}
-                      <button className="primary icon-btn" onClick={() => applyPayment(invoice)} title="Mark Payment" aria-label="Mark Payment">
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        title={editingInvoiceId === invoice.id ? 'Close Edit' : 'Quick Edit'}
+                        aria-label={editingInvoiceId === invoice.id ? 'Close Edit' : 'Quick Edit'}
+                        onClick={() => (editingInvoiceId === invoice.id ? cancelInvoiceEdit() : startInvoiceEdit(invoice))}
+                      >
+                        <UiIcon name="edit" />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn danger-btn"
+                        title="Delete invoice"
+                        aria-label="Delete invoice"
+                        onClick={() => openDeleteModal(invoice)}
+                      >
+                        <UiIcon name="trash" />
+                      </button>
+                    </span>
+                  </div>
+                  {!fullyPaid && (
+                  <div className="payment-controls">
+                    <span className="muted payment-meta">
+                      Paid: ${invoice.paidAmount.toFixed(2)} | Remaining: ${remaining.toFixed(2)}
+                    </span>
+                    <select
+                      className="payment-channel-field"
+                      value={paymentChannel[invoice.id] || invoice.paymentChannel || 'Interac'}
+                      onChange={(e) =>
+                        setPaymentChannel((prev) => ({
+                          ...prev,
+                          [invoice.id]: e.target.value as InvoiceRecord['paymentChannel'],
+                        }))
+                      }
+                    >
+                      <option>Interac e-Transfer</option>
+                      <option>E-Transfer</option>
+                      <option>Interac</option>
+                      <option>Bank Transfer</option>
+                      <option>Credit Card</option>
+                      <option>Cash</option>
+                    </select>
+                    <input
+                      type="number"
+                      className="payment-amount-field"
+                      value={paymentAmount[invoice.id] ?? ''}
+                      onChange={(e) =>
+                        setPaymentAmount((prev) => ({ ...prev, [invoice.id]: Number(e.target.value) || 0 }))
+                      }
+                      placeholder="Payment amount"
+                      min={0}
+                      step="0.01"
+                    />
+                    <div className="payment-actions">
+                      <button
+                        type="button"
+                        className="primary icon-btn"
+                        disabled={paymentBusyId === invoice.id}
+                        onClick={() => applyPayment(invoice)}
+                        title="Mark Payment"
+                        aria-label="Mark Payment"
+                      >
                         <UiIcon name="check" />
                       </button>
                       {editingInvoiceId === invoice.id && (
@@ -3093,6 +3748,7 @@ function InvoicesPage({
                       )}
                     </div>
                   </div>
+                  )}
 
                   {editingInvoiceId === invoice.id && (
                     <div className="inline-editor">
@@ -3167,6 +3823,8 @@ function InvoicesPage({
                               }))
                             }
                           >
+                            <option>Interac e-Transfer</option>
+                            <option>E-Transfer</option>
                             <option>Interac</option>
                             <option>Bank Transfer</option>
                             <option>Credit Card</option>
@@ -3195,6 +3853,51 @@ function InvoicesPage({
             </span>
           </div>
         </div>
+
+      {deleteTarget && (
+        <div className="inline-modal-backdrop" onClick={closeDeleteModal}>
+          <div
+            className="inline-modal delete-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-invoice-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="delete-invoice-title">Delete invoice</h3>
+            <p className="muted">
+              This permanently removes <strong>{deleteTarget.invoiceNumber}</strong> from your workspace, including line
+              items and the stored PDF (if any). This cannot be undone.
+            </p>
+            <div className="delete-confirm-box">
+              <p>
+                To confirm, type <code>{deleteTarget.invoiceNumber}</code> below:
+              </p>
+              <input
+                autoFocus
+                value={deleteConfirmNumber}
+                onChange={(e) => {
+                  setDeleteConfirmNumber(e.target.value)
+                  setDeleteError(null)
+                }}
+                placeholder={deleteTarget.invoiceNumber}
+                aria-label="Confirm invoice number"
+              />
+            </div>
+            {deleteError && (
+              <p className="danger delete-confirm-error" role="alert">
+                {deleteError}
+              </p>
+            )}
+            <div className="editor-actions">
+              <button type="button" className="danger-btn" disabled={!deleteConfirmMatches || deleteBusy} onClick={confirmDeleteInvoice}>
+                {deleteBusy ? 'Deleting…' : 'Delete invoice'}
+              </button>
+              <button type="button" disabled={deleteBusy} onClick={closeDeleteModal}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
     </section>
@@ -3203,15 +3906,23 @@ function InvoicesPage({
 
 function ClientsPage({
   clients,
-  setClients,
+  onUpdateClients,
+  onDeleteClient,
 }: {
   clients: ClientRecord[]
-  setClients: (clients: ClientRecord[]) => void
+  onUpdateClients: (clients: ClientRecord[]) => Promise<void>
+  onDeleteClient: (clientId: string, clientIdConfirm: string) => Promise<void>
 }) {
   const [clientSearch, setClientSearch] = useState('')
   const [clientSort, setClientSort] = useState<'name-asc' | 'name-desc' | 'invoice-desc'>('name-asc')
   const [showClientModal, setShowClientModal] = useState(false)
+  const [clientSaveBusy, setClientSaveBusy] = useState(false)
+  const [clientSaveError, setClientSaveError] = useState<string | null>(null)
   const [editingClientId, setEditingClientId] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ClientRecord | null>(null)
+  const [deleteConfirmId, setDeleteConfirmId] = useState('')
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [clientForm, setClientForm] = useState({
     name: '',
     email: '',
@@ -3264,46 +3975,99 @@ function ClientsPage({
       !clientForm.streetAddress.trim() ||
       !clientForm.city.trim() ||
       !clientForm.province.trim() ||
-      !clientForm.postalCode.trim()
+      !clientForm.postalCode.trim() ||
+      clientSaveBusy
     )
       return
-    if (editingClientId) {
-      setClients(
-        clients.map((client) =>
-          client.id === editingClientId
-            ? {
-                ...client,
-                name: clientForm.name.trim(),
-                email: clientForm.email.trim(),
-                phone: clientForm.phone.trim(),
-                company: clientForm.company.trim(),
-                streetAddress: clientForm.streetAddress.trim(),
-                city: clientForm.city.trim(),
-                province: clientForm.province.trim().toUpperCase(),
-                postalCode: clientForm.postalCode.trim().toUpperCase(),
-                gstHstNumber: clientForm.gstHstNumber.trim(),
-              }
-            : client,
-        ),
-      )
-    } else {
-      const next: ClientRecord = {
-        id: `cl-${Date.now()}`,
-        name: clientForm.name.trim(),
-        email: clientForm.email.trim(),
-        phone: clientForm.phone.trim(),
-        company: clientForm.company.trim(),
-        streetAddress: clientForm.streetAddress.trim(),
-        city: clientForm.city.trim(),
-        province: clientForm.province.trim().toUpperCase(),
-        postalCode: clientForm.postalCode.trim().toUpperCase(),
-        gstHstNumber: clientForm.gstHstNumber.trim(),
-        totalInvoiced: 0,
+    setClientSaveBusy(true)
+    setClientSaveError(null)
+    void (async () => {
+      try {
+        if (editingClientId) {
+          await onUpdateClients(
+            clients.map((client) =>
+              client.id === editingClientId
+                ? {
+                    ...client,
+                    name: clientForm.name.trim(),
+                    email: clientForm.email.trim(),
+                    phone: clientForm.phone.trim(),
+                    company: clientForm.company.trim(),
+                    streetAddress: clientForm.streetAddress.trim(),
+                    city: clientForm.city.trim(),
+                    province: clientForm.province.trim().toUpperCase(),
+                    postalCode: clientForm.postalCode.trim().toUpperCase(),
+                    gstHstNumber: clientForm.gstHstNumber.trim(),
+                  }
+                : client,
+            ),
+          )
+        } else {
+          const next: ClientRecord = {
+            id: getNextClientId(clients),
+            name: clientForm.name.trim(),
+            email: clientForm.email.trim(),
+            phone: clientForm.phone.trim(),
+            company: clientForm.company.trim(),
+            streetAddress: clientForm.streetAddress.trim(),
+            city: clientForm.city.trim(),
+            province: clientForm.province.trim().toUpperCase(),
+            postalCode: clientForm.postalCode.trim().toUpperCase(),
+            gstHstNumber: clientForm.gstHstNumber.trim(),
+            totalInvoiced: 0,
+          }
+          await onUpdateClients([next, ...clients])
+        }
+        setShowClientModal(false)
+      } catch (err) {
+        setClientSaveError(err instanceof Error ? err.message : 'Could not save client')
+      } finally {
+        setClientSaveBusy(false)
       }
-      setClients([next, ...clients])
-    }
-    setShowClientModal(false)
+    })()
   }
+
+  const openDeleteModal = (client: ClientRecord) => {
+    if (showClientModal) {
+      setShowClientModal(false)
+    }
+    setDeleteTarget(client)
+    setDeleteConfirmId('')
+    setDeleteError(null)
+  }
+
+  const closeDeleteModal = () => {
+    if (deleteBusy) return
+    setDeleteTarget(null)
+    setDeleteConfirmId('')
+    setDeleteError(null)
+  }
+
+  const confirmDeleteClient = () => {
+    if (!deleteTarget) return
+    const expected = formatClientIdDisplay(deleteTarget.id)
+    const typed = deleteConfirmId.trim()
+    if (typed !== expected) {
+      setDeleteError(`Type ${expected} exactly to confirm deletion.`)
+      return
+    }
+    setDeleteBusy(true)
+    setDeleteError(null)
+    void (async () => {
+      try {
+        await onDeleteClient(deleteTarget.id, expected)
+        setDeleteTarget(null)
+        setDeleteConfirmId('')
+      } catch (err) {
+        setDeleteError(err instanceof Error ? err.message : 'Delete failed')
+      } finally {
+        setDeleteBusy(false)
+      }
+    })()
+  }
+
+  const deleteConfirmMatches =
+    deleteTarget != null && deleteConfirmId.trim() === formatClientIdDisplay(deleteTarget.id)
 
   const filteredClients = clients
     .filter((client) =>
@@ -3325,6 +4089,12 @@ function ClientsPage({
           <p className="muted">Manage your client directory in a dedicated workspace.</p>
         </div>
       </div>
+
+      {clientSaveError && (
+        <p className="danger" role="alert" style={{ marginBottom: '0.75rem' }}>
+          {clientSaveError}
+        </p>
+      )}
 
       <div className="card section-panel">
         <div className="clients-toolbar">
@@ -3359,7 +4129,7 @@ function ClientsPage({
           </div>
         </div>
 
-        <div className="data-grid table table-scroll">
+        <div className="data-grid table mobile-stack-table">
           <div className="data-grid-head table-row table-head-row client-row client-grid">
             <strong />
             <strong>Member</strong>
@@ -3370,24 +4140,33 @@ function ClientsPage({
             <strong>Actions</strong>
           </div>
           {filteredClients.map((client) => (
-            <div key={client.id} className="data-grid-row table-row client-row client-grid">
-              <span>
-                <input type="checkbox" />
+            <div key={client.id} className="data-grid-row table-row client-row client-grid mobile-stack-row mobile-stack-card">
+              <span className="cell-checkbox">
+                <input type="checkbox" aria-label={`Select ${client.name}`} />
               </span>
-              <span>
+              <span data-label="Member">
                 <strong>{client.name}</strong>
                 <br />
                 <span className="muted">{client.email || '-'}</span>
               </span>
-              <span>{client.id.toUpperCase()}</span>
-              <span>{client.gstHstNumber || '-'}</span>
-              <span>
+              <span data-label="Client ID">{formatClientIdDisplay(client.id)}</span>
+              <span data-label="GST/HST">{client.gstHstNumber || '-'}</span>
+              <span data-label="Location">
                 {client.city}, {client.province}
               </span>
-              <strong>${client.totalInvoiced.toFixed(2)}</strong>
-              <div className="row-actions">
+              <strong data-label="Total">${client.totalInvoiced.toFixed(2)}</strong>
+              <div className="row-actions cell-actions" data-label="Actions">
                 <button className="icon-btn" title="Quick Edit" aria-label="Quick Edit" onClick={() => openEditClientModal(client)}>
                   <UiIcon name="edit" />
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn danger-btn"
+                  title="Delete client"
+                  aria-label="Delete client"
+                  onClick={() => openDeleteModal(client)}
+                >
+                  <UiIcon name="trash" />
                 </button>
               </div>
             </div>
@@ -3496,6 +4275,53 @@ function ClientsPage({
                 {editingClientId ? 'Save Changes' : 'Save Client'}
               </button>
               <button onClick={() => setShowClientModal(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="inline-modal-backdrop" onClick={closeDeleteModal}>
+          <div
+            className="inline-modal delete-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-client-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="delete-client-title">Delete client</h3>
+            <p className="muted">
+              This permanently removes <strong>{deleteTarget.name}</strong> (
+              {formatClientIdDisplay(deleteTarget.id)}) from your client directory. Existing invoices are not deleted.
+              This cannot be undone.
+            </p>
+            <div className="delete-confirm-box">
+              <p>
+                To confirm, type <code>{formatClientIdDisplay(deleteTarget.id)}</code> below:
+              </p>
+              <input
+                autoFocus
+                value={deleteConfirmId}
+                onChange={(e) => {
+                  setDeleteConfirmId(e.target.value)
+                  setDeleteError(null)
+                }}
+                placeholder={formatClientIdDisplay(deleteTarget.id)}
+                aria-label="Confirm client ID"
+              />
+            </div>
+            {deleteError && (
+              <p className="danger delete-confirm-error" role="alert">
+                {deleteError}
+              </p>
+            )}
+            <div className="editor-actions">
+              <button type="button" className="danger-btn" disabled={!deleteConfirmMatches || deleteBusy} onClick={confirmDeleteClient}>
+                {deleteBusy ? 'Deleting…' : 'Delete client'}
+              </button>
+              <button type="button" disabled={deleteBusy} onClick={closeDeleteModal}>
+                Cancel
+              </button>
             </div>
           </div>
         </div>
